@@ -1,0 +1,94 @@
+---
+name: claude-code-companion
+description: Use Claude Code as a second reviewer or research collaborator while keeping Codex in control. Prefer this when a task benefits from independent review, long-context code inspection, adversarial critique, or parallel research, especially when Claude Code may run slowly and raw stream-json should not enter Codex context.
+---
+
+# Claude Code Companion
+
+Use this skill when Claude Code should help Codex think, review, or investigate.
+Claude is a collaborator, not the owner of the task. Codex remains responsible
+for validating the result before changing files or answering the user.
+
+## When To Call Claude
+
+Call Claude Code when at least one of these is true:
+
+- A code review needs an independent second opinion.
+- A design or implementation plan needs adversarial critique.
+- A repository has enough context that another long-context pass may catch
+  missed issues.
+- A research task can be split so Codex and Claude investigate in parallel.
+- Claude may take a long time, and Codex needs a reliable way to wait, poll, and
+  retrieve the final answer without reading raw stream-json.
+
+Do not call Claude for tiny tasks where Codex can answer directly.
+
+## Default Collaboration Rules
+
+- Send Claude a Markdown prompt, not a JSON request protocol.
+- Include `cwd`, branch/base, task goal, constraints, relevant commands, and
+  what output you need.
+- Default to highest effort unless the user asks for a faster pass.
+- Treat Claude as read-only by default.
+- Use the helper's default non-persistent print-mode session. Only pass
+  `--persist-session` when the user explicitly wants Claude Code resume state.
+- Do not let Claude and Codex edit the same files at the same time unless the
+  user explicitly asks for a handoff.
+- Do not expose secrets. Never ask Claude to print env values. If env checking
+  is needed, only allow `KEY=unset` or `KEY=REDACTED`.
+- Remember that Claude Code may receive default CLI/project context even when
+  the prompt says not to read files. Treat its answer as informed by that
+  context unless the command runs in a deliberately isolated directory.
+- Codex must independently inspect and verify Claude's findings before acting.
+
+## How To Run
+
+The helper script is in this skill:
+
+```bash
+scripts/cc-watch
+```
+
+For short synchronous work:
+
+```bash
+scripts/cc-watch run --cwd . -- "Review the current diff. Return only actionable findings."
+```
+
+For long work:
+
+```bash
+job_id="$(scripts/cc-watch start --cwd . -- "Investigate this repo and report risks.")"
+scripts/cc-watch status "$job_id"
+scripts/cc-watch result "$job_id"
+```
+
+Use `status` while waiting. `running-quiet` means Claude is still alive but has
+not emitted stream-json recently; do not treat it as failure.
+
+## Prompt Shape
+
+Use plain Markdown:
+
+```text
+Task:
+Review the current branch as a read-only second reviewer.
+
+Context:
+- cwd: /absolute/path
+- branch: feature-x
+- base: main
+- constraints: do not edit files; do not print secrets
+
+What to inspect:
+- Current git diff
+- Relevant tests or docs
+
+Output:
+- Findings first, ordered by severity
+- File/line references where possible
+- Mention uncertainty and verification gaps
+```
+
+For research tasks, ask Claude to produce sources, claims, uncertainty, and a
+short synthesis that Codex can merge with its own findings.

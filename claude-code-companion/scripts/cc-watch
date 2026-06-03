@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+set -u
+
+QUIET_AFTER_DEFAULT=60
+EFFORT_DEFAULT=max
+DISALLOWED_READONLY_TOOLS="Edit,MultiEdit,Write,NotebookEdit,Bash"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cc-watch run [options] -- PROMPT
+  cc-watch start [options] -- PROMPT
+  cc-watch status <job-id> [--cwd DIR]
+  cc-watch result <job-id> [--cwd DIR]
+  cc-watch cancel <job-id> [--cwd DIR]
+
+Options:
+  --cwd DIR             Target working directory. Default: current directory.
+  --effort LEVEL        Claude effort level. Default: max.
+  --model MODEL         Optional Claude model.
+  --claude PATH         Claude binary. Default: $CLAUDE_BIN or claude.
+  --quiet-after SEC     Seconds without stream events before running-quiet.
+  --allow-bash          Do not disallow Bash. Off by default.
+  --persist-session     Allow Claude Code to persist this print-mode session.
+  --                    End options; remaining text is the prompt.
+
+The script consumes Claude's raw stream-json output and prints only compact
+status plus the final result. Async state is stored under <cwd>/.cc-watch/.
+EOF
+}
+
+die() {
+  printf 'cc-watch: %s\n' "$*" >&2
+  exit 1
+}
+
+now_epoch() {
+  date +%s
+}
+
+absolute_dir() {
+  local dir="$1"
+  (cd "$dir" 2>/dev/null && pwd) || return 1
+}
+
+script_path() {
+  local src="${BASH_SOURCE[0]}"
+  local dir
+  dir="$(cd "$(dirname "$src")" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$src")"
+}
+
+state_root_for() {
+  local cwd="$1"
+  printf '%s/.cc-watch\n' "$cwd"
+}
+
+job_dir_for() {
+  local cwd="$1"
+  local job_id="$2"
+  printf '%s/%s\n' "$(state_root_for "$cwd")" "$job_id"
+}
+
+new_job_id() {
+  printf 'cc-%s-%s\n' "$(date +%Y%m%d%H%M%S)" "$$"
+}
+
+write_file() {
+  local path="$1"
+  shift
+  printf '%s\n' "$*" > "$path"
+}
+
+read_file() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    cat "$path"
+  fi
+}
+
+is_pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+json_field_from_stdin() {
+  local field="$1"
+  perl -MJSON::PP -CS -e '
+    my $field = shift;
+    my $line = do { local $/; <STDIN> };
+    my $json = eval { JSON::PP->new->decode($line) };
+    exit 2 unless $json && exists $json->{$field} && defined $json->{$field};
+    print $json->{$field};
+  ' "$field"
+}
+
+extract_result_line() {
+  local line="$1"
+  local result session
+  result="$(printf '%s' "$line" | json_field_from_stdin result 2>/dev/null || true)"
+  session="$(printf '%s' "$line" | json_field_from_stdin session_id 2>/dev/null || true)"
+  printf '%s' "$result"
+  if [ -n "$session" ]; then
+    printf '%s\n' "$session" > "$JOB_DIR/session_id"
+  fi
+}
+
+parse_prompt() {
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$*"
+  else
+    cat
+  fi
+}
+
+parse_run_options() {
+  CWD="."
+  EFFORT="$EFFORT_DEFAULT"
+  MODEL=""
+  CLAUDE="${CLAUDE_BIN:-claude}"
+  QUIET_AFTER="$QUIET_AFTER_DEFAULT"
+  READONLY=1
+  NO_SESSION_PERSISTENCE=1
+  PROMPT_ARGS=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --effort)
+        [ "$#" -ge 2 ] || die "--effort requires a value"
+        EFFORT="$2"
+        shift 2
+        ;;
+      --model)
+        [ "$#" -ge 2 ] || die "--model requires a value"
+        MODEL="$2"
+        shift 2
+        ;;
+      --claude)
+        [ "$#" -ge 2 ] || die "--claude requires a value"
+        CLAUDE="$2"
+        shift 2
+        ;;
+      --quiet-after)
+        [ "$#" -ge 2 ] || die "--quiet-after requires a value"
+        QUIET_AFTER="$2"
+        shift 2
+        ;;
+      --allow-bash)
+        READONLY=0
+        shift
+        ;;
+      --persist-session)
+        NO_SESSION_PERSISTENCE=0
+        shift
+        ;;
+      --)
+        shift
+        PROMPT_ARGS=("$@")
+        break
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+}
+
+parse_job_options() {
+  CWD="."
+  JOB_ID=""
+
+  [ "$#" -ge 1 ] || die "missing job id"
+  JOB_ID="$1"
+  shift
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+}
+
+write_config() {
+  mkdir -p "$JOB_DIR" || die "cannot create job dir: $JOB_DIR"
+  write_file "$JOB_DIR/job_id" "$JOB_ID"
+  write_file "$JOB_DIR/cwd" "$CWD"
+  write_file "$JOB_DIR/claude" "$CLAUDE"
+  write_file "$JOB_DIR/effort" "$EFFORT"
+  write_file "$JOB_DIR/model" "$MODEL"
+  write_file "$JOB_DIR/quiet_after" "$QUIET_AFTER"
+  write_file "$JOB_DIR/readonly" "$READONLY"
+  write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
+  write_file "$JOB_DIR/status" "starting"
+  write_file "$JOB_DIR/started_at" "$(now_epoch)"
+  write_file "$JOB_DIR/last_event_at" "0"
+  parse_prompt "${PROMPT_ARGS[@]}" > "$JOB_DIR/prompt.md"
+}
+
+load_config() {
+  CWD="$(read_file "$JOB_DIR/cwd")"
+  CLAUDE="$(read_file "$JOB_DIR/claude")"
+  EFFORT="$(read_file "$JOB_DIR/effort")"
+  MODEL="$(read_file "$JOB_DIR/model")"
+  QUIET_AFTER="$(read_file "$JOB_DIR/quiet_after")"
+  READONLY="$(read_file "$JOB_DIR/readonly")"
+  NO_SESSION_PERSISTENCE="$(read_file "$JOB_DIR/no_session_persistence")"
+}
+
+build_claude_args() {
+  CLAUDE_ARGS=(-p --output-format stream-json --verbose --effort "$EFFORT" --permission-mode dontAsk)
+  if [ -n "$MODEL" ]; then
+    CLAUDE_ARGS+=(--model "$MODEL")
+  fi
+  if [ "$NO_SESSION_PERSISTENCE" = "1" ]; then
+    CLAUDE_ARGS+=(--no-session-persistence)
+  fi
+  if [ "$READONLY" = "1" ]; then
+    CLAUDE_ARGS+=(--disallowed-tools "$DISALLOWED_READONLY_TOOLS")
+  fi
+}
+
+update_running_status() {
+  local last_event="$1"
+  local now delta status
+  now="$(now_epoch)"
+  delta=$((now - last_event))
+  if [ "$last_event" -gt 0 ] && [ "$delta" -le "$QUIET_AFTER" ]; then
+    status="running-active"
+  else
+    status="running-quiet"
+  fi
+  write_file "$JOB_DIR/status" "$status"
+}
+
+worker() {
+  JOB_DIR="$1"
+  [ -d "$JOB_DIR" ] || die "missing job dir: $JOB_DIR"
+  load_config
+
+  local fifo="$JOB_DIR/stdout.fifo"
+  local stderr_log="$JOB_DIR/stderr.log"
+  local stdout_log="$JOB_DIR/stdout.jsonl"
+  local exit_code_file="$JOB_DIR/exit_code"
+  local result_file="$JOB_DIR/result.txt"
+  local final_line_file="$JOB_DIR/final-result.json"
+
+  rm -f "$fifo"
+  mkfifo "$fifo" || die "cannot create fifo"
+  : > "$stderr_log"
+  : > "$stdout_log"
+  : > "$result_file"
+  rm -f "$exit_code_file" "$final_line_file"
+
+  build_claude_args
+  write_file "$JOB_DIR/status" "running-quiet"
+
+  (
+    cd "$CWD" || exit 97
+    "$CLAUDE" "${CLAUDE_ARGS[@]}" < "$JOB_DIR/prompt.md" > "$fifo" 2> "$stderr_log"
+    printf '%s\n' "$?" > "$exit_code_file"
+  ) &
+  local claude_pid="$!"
+  write_file "$JOB_DIR/claude_pid" "$claude_pid"
+
+  local line ts saw_result=0
+  while IFS= read -r line; do
+    ts="$(now_epoch)"
+    write_file "$JOB_DIR/last_event_at" "$ts"
+    update_running_status "$ts"
+    printf '%s\n' "$line" >> "$stdout_log"
+    if printf '%s\n' "$line" | grep -q '"type"[[:space:]]*:[[:space:]]*"result"'; then
+      saw_result=1
+      printf '%s\n' "$line" > "$final_line_file"
+      extract_result_line "$line" > "$result_file"
+    fi
+  done < "$fifo"
+
+  wait "$claude_pid"
+  local wait_code="$?"
+  local exit_code="$wait_code"
+  if [ -f "$exit_code_file" ]; then
+    exit_code="$(cat "$exit_code_file")"
+  fi
+  write_file "$JOB_DIR/exit_code" "$exit_code"
+  rm -f "$fifo"
+
+  if [ "$exit_code" = "0" ] && [ "$saw_result" = "1" ]; then
+    write_file "$JOB_DIR/status" "finished"
+    return 0
+  fi
+
+  if [ "$exit_code" = "0" ]; then
+    write_file "$JOB_DIR/status" "failed"
+    printf 'Claude exited with code 0 but no final result event was found.\n' >> "$stderr_log"
+  else
+    write_file "$JOB_DIR/status" "failed"
+  fi
+  return 1
+}
+
+render_status() {
+  [ -d "$JOB_DIR" ] || {
+    printf 'unknown job=%s reason=missing-state\n' "$JOB_ID"
+    return 3
+  }
+
+  local status worker_pid claude_pid last_event quiet_after now delta rendered exit_code session
+  status="$(read_file "$JOB_DIR/status")"
+  worker_pid="$(read_file "$JOB_DIR/worker_pid")"
+  claude_pid="$(read_file "$JOB_DIR/claude_pid")"
+  last_event="$(read_file "$JOB_DIR/last_event_at")"
+  quiet_after="$(read_file "$JOB_DIR/quiet_after")"
+  exit_code="$(read_file "$JOB_DIR/exit_code")"
+  session="$(read_file "$JOB_DIR/session_id")"
+
+  [ -n "$last_event" ] || last_event=0
+  [ -n "$quiet_after" ] || quiet_after="$QUIET_AFTER_DEFAULT"
+
+  if [ "$status" = "finished" ] || [ "$status" = "failed" ] || [ "$status" = "canceled" ]; then
+    rendered="$status"
+  elif is_pid_alive "$claude_pid" || is_pid_alive "$worker_pid"; then
+    now="$(now_epoch)"
+    delta=$((now - last_event))
+    if [ "$last_event" -gt 0 ] && [ "$delta" -le "$quiet_after" ]; then
+      rendered="running-active"
+    else
+      rendered="running-quiet"
+    fi
+  else
+    rendered="failed"
+  fi
+
+  printf '%s job=%s' "$rendered" "$JOB_ID"
+  [ -n "$claude_pid" ] && printf ' claude_pid=%s' "$claude_pid"
+  [ -n "$worker_pid" ] && printf ' worker_pid=%s' "$worker_pid"
+  [ -n "$last_event" ] && [ "$last_event" != "0" ] && printf ' last_event_at=%s' "$last_event"
+  [ -n "$exit_code" ] && printf ' exit_code=%s' "$exit_code"
+  [ -n "$session" ] && printf ' session_id=%s' "$session"
+  printf '\n'
+
+  case "$rendered" in
+    finished) return 0 ;;
+    running-active|running-quiet) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_run() {
+  parse_run_options "$@"
+  JOB_ID="$(new_job_id)"
+  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+  write_config
+  write_file "$JOB_DIR/worker_pid" "$$"
+
+  printf '[cc] job=%s status=starting\n' "$JOB_ID"
+  worker "$JOB_DIR"
+  local code="$?"
+  render_status >/dev/null || true
+
+  if [ "$code" -eq 0 ]; then
+    printf '[cc] job=%s status=finished\n' "$JOB_ID"
+    cat "$JOB_DIR/result.txt"
+    printf '\n'
+  else
+    printf '[cc] job=%s status=failed\n' "$JOB_ID" >&2
+    tail -40 "$JOB_DIR/stderr.log" >&2 2>/dev/null || true
+  fi
+  return "$code"
+}
+
+cmd_start() {
+  parse_run_options "$@"
+  JOB_ID="$(new_job_id)"
+  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+  write_config
+
+  local self
+  self="$(script_path)" || die "cannot resolve script path"
+  "$self" __worker "$JOB_DIR" > "$JOB_DIR/monitor.log" 2>&1 &
+  local worker_pid="$!"
+  write_file "$JOB_DIR/worker_pid" "$worker_pid"
+  printf '%s\n' "$JOB_ID"
+}
+
+cmd_result() {
+  parse_job_options "$@"
+  [ -d "$JOB_DIR" ] || die "unknown job: $JOB_ID"
+
+  local status
+  status="$(read_file "$JOB_DIR/status")"
+  if [ "$status" = "finished" ] && [ -f "$JOB_DIR/result.txt" ]; then
+    cat "$JOB_DIR/result.txt"
+    printf '\n'
+    return 0
+  fi
+
+  render_status
+  return $?
+}
+
+cmd_cancel() {
+  parse_job_options "$@"
+  [ -d "$JOB_DIR" ] || die "unknown job: $JOB_ID"
+
+  local claude_pid worker_pid
+  claude_pid="$(read_file "$JOB_DIR/claude_pid")"
+  worker_pid="$(read_file "$JOB_DIR/worker_pid")"
+
+  if is_pid_alive "$claude_pid"; then
+    kill "$claude_pid" 2>/dev/null || true
+  fi
+  if is_pid_alive "$worker_pid"; then
+    kill "$worker_pid" 2>/dev/null || true
+  fi
+  write_file "$JOB_DIR/status" "canceled"
+  printf 'canceled job=%s\n' "$JOB_ID"
+}
+
+main() {
+  [ "$#" -gt 0 ] || {
+    usage
+    exit 2
+  }
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    run) cmd_run "$@" ;;
+    start) cmd_start "$@" ;;
+    status)
+      parse_job_options "$@"
+      render_status
+      ;;
+    result) cmd_result "$@" ;;
+    cancel) cmd_cancel "$@" ;;
+    __worker) worker "$@" ;;
+    -h|--help) usage ;;
+    *) die "unknown command: $command" ;;
+  esac
+}
+
+main "$@"
