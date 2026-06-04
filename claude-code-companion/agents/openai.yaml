@@ -1,0 +1,8 @@
+interface:
+  display_name: "Claude Code Companion"
+  short_description: "Use Claude Code as a second reviewer"
+  default_prompt: "Use $claude-code-companion to ask Claude Code for a read-only second review of this repo."
+
+policy:
+  allow_implicit_invocation: true
+

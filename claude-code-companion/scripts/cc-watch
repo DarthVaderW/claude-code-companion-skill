@@ -57,6 +57,14 @@ state_root_for() {
   printf '%s/.cc-watch\n' "$cwd"
 }
 
+ensure_state_root() {
+  local root="$1"
+  mkdir -p "$root" || die "cannot create state root: $root"
+  if [ ! -f "$root/.gitignore" ]; then
+    printf '*\n!.gitignore\n' > "$root/.gitignore"
+  fi
+}
+
 job_dir_for() {
   local cwd="$1"
   local job_id="$2"
@@ -225,6 +233,7 @@ parse_job_options() {
 }
 
 write_config() {
+  ensure_state_root "$(state_root_for "$CWD")"
   mkdir -p "$JOB_DIR" || die "cannot create job dir: $JOB_DIR"
   write_file "$JOB_DIR/job_id" "$JOB_ID"
   write_file "$JOB_DIR/cwd" "$CWD"
