@@ -13,6 +13,7 @@ Usage:
   cc-watch status <job-id> [--cwd DIR]
   cc-watch result <job-id> [--cwd DIR]
   cc-watch cancel <job-id> [--cwd DIR]
+  cc-watch doctor [options]
 
 Options:
   --cwd DIR             Target working directory. Default: current directory.
@@ -285,6 +286,35 @@ parse_job_options() {
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
   JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+}
+
+parse_doctor_options() {
+  CWD="."
+  CLAUDE="${CLAUDE_BIN:-claude}"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --claude)
+        [ "$#" -ge 2 ] || die "--claude requires a value"
+        CLAUDE="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
 }
 
 write_config() {
@@ -573,6 +603,78 @@ cmd_cancel() {
   printf 'canceled job=%s\n' "$JOB_ID"
 }
 
+render_env_status() {
+  local key="$1"
+  if [ -n "${!key:-}" ]; then
+    printf '%s=REDACTED\n' "$key"
+  else
+    printf '%s=unset\n' "$key"
+  fi
+}
+
+render_flag_status() {
+  local help_text="$1"
+  local label="$2"
+  local pattern="$3"
+  if printf '%s' "$help_text" | grep -q -- "$pattern"; then
+    printf 'flag_%s=yes\n' "$label"
+  else
+    printf 'flag_%s=no\n' "$label"
+  fi
+}
+
+render_state_ignore_status() {
+  local root
+  root="$(state_root_for "$CWD")"
+  printf 'state_root=%s\n' "$root"
+  if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git -C "$CWD" check-ignore -q .cc-watch/; then
+      printf 'state_git_ignored=yes\n'
+    else
+      printf 'state_git_ignored=no\n'
+    fi
+  else
+    printf 'state_git_ignored=not-git\n'
+  fi
+}
+
+cmd_doctor() {
+  parse_doctor_options "$@"
+
+  local resolved version help_text
+  printf 'cwd=%s\n' "$CWD"
+  if resolved="$(resolve_claude_binary)"; then
+    CLAUDE="$resolved"
+    printf 'claude_path=%s\n' "$CLAUDE"
+    version="$("$CLAUDE" --version 2>/dev/null || true)"
+    if [ -n "$version" ]; then
+      printf 'claude_version=%s\n' "$version"
+    else
+      printf 'claude_version=unknown\n'
+    fi
+    help_text="$("$CLAUDE" --help 2>/dev/null || true)"
+    render_flag_status "$help_text" "print" "-p, --print"
+    render_flag_status "$help_text" "stream_json" "stream-json"
+    render_flag_status "$help_text" "tools" "--tools"
+    render_flag_status "$help_text" "strict_mcp_config" "--strict-mcp-config"
+    render_flag_status "$help_text" "no_session_persistence" "--no-session-persistence"
+    render_flag_status "$help_text" "permission_mode" "--permission-mode"
+  else
+    printf 'claude_path=missing\n'
+    printf 'claude_version=unknown\n'
+  fi
+
+  render_env_status ANTHROPIC_API_KEY
+  render_env_status ANTHROPIC_AUTH_TOKEN
+  render_env_status CLAUDE_CODE_OAUTH_TOKEN
+  render_env_status ANTHROPIC_BASE_URL
+  render_env_status HTTP_PROXY
+  render_env_status HTTPS_PROXY
+  render_env_status ALL_PROXY
+  render_env_status NO_PROXY
+  render_state_ignore_status
+}
+
 main() {
   [ "$#" -gt 0 ] || {
     usage
@@ -591,6 +693,7 @@ main() {
       ;;
     result) cmd_result "$@" ;;
     cancel) cmd_cancel "$@" ;;
+    doctor) cmd_doctor "$@" ;;
     __worker) worker "$@" ;;
     -h|--help) usage ;;
     *) die "unknown command: $command" ;;

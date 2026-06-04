@@ -15,6 +15,18 @@ if [ "${1:-}" = "--version" ]; then
   printf 'fake claude 0.0.0\n'
   exit 0
 fi
+if [ "${1:-}" = "--help" ]; then
+  cat <<'HELP'
+Usage: fake claude
+  -p, --print
+  --output-format stream-json
+  --tools
+  --strict-mcp-config
+  --no-session-persistence
+  --permission-mode
+HELP
+  exit 0
+fi
 
 case "${FAKE_BEHAVIOR:-success}" in
   success)
@@ -127,5 +139,23 @@ if FAKE_ARGS_LOG="$fail_args" FAKE_BEHAVIOR=fail \
   "$CC_WATCH" run --cwd "$fail_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
   fail "non-zero Claude run should fail"
 fi
+
+doctor_work="$(new_workdir doctor)"
+doctor_out="$TMP_ROOT/doctor.out"
+doctor_args="$TMP_ROOT/doctor.args"
+ANTHROPIC_API_KEY=dummy-secret FAKE_ARGS_LOG="$doctor_args" \
+  "$CC_WATCH" doctor --cwd "$doctor_work" --claude "$FAKE_CLAUDE" > "$doctor_out"
+doctor_text="$(cat "$doctor_out")"
+assert_contains "$doctor_text" "claude_path=$FAKE_CLAUDE"
+assert_contains "$doctor_text" "claude_version=fake claude 0.0.0"
+assert_contains "$doctor_text" "flag_print=yes"
+assert_contains "$doctor_text" "flag_stream_json=yes"
+assert_contains "$doctor_text" "flag_tools=yes"
+assert_contains "$doctor_text" "flag_strict_mcp_config=yes"
+assert_contains "$doctor_text" "flag_no_session_persistence=yes"
+assert_contains "$doctor_text" "flag_permission_mode=yes"
+assert_contains "$doctor_text" "ANTHROPIC_API_KEY=REDACTED"
+assert_not_contains "$doctor_text" "dummy-secret"
+assert_contains "$doctor_text" "state_git_ignored=not-git"
 
 printf 'test_cc_watch ok\n'
