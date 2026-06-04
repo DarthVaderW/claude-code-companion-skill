@@ -38,6 +38,14 @@ claude-code-companion/scripts/cc-watch status "$job_id"
 claude-code-companion/scripts/cc-watch result "$job_id"
 ```
 
+When Codex itself is calling Claude, prefer foreground `run`; it waits without
+printing raw stream-json. Some Codex command runners clean background children
+when a tool call exits, so `start/status/result` is best for a normal terminal,
+a persistent shell, or a single shell script that starts and waits in one go.
+`status` includes `elapsed=<seconds>`, and jobs time out after 1800 seconds by
+default. Override that with `--max-runtime SEC`, or use `--max-runtime 0` to
+disable the timeout.
+
 Runtime state for async jobs is written only under the target working directory:
 
 ```text
@@ -101,7 +109,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.2.0
+  --ref v0.2.1
 ```
 
 Restart Codex after installing or updating skills.
@@ -125,6 +133,8 @@ running-active  Claude child process is alive and stream-json emitted recently.
 running-quiet   Claude child process is alive but has been quiet for a while.
 finished        Final result was received and the process exited successfully.
 failed          Process exited non-zero or exited without a final result.
+canceled        User canceled the job.
+timed-out       Job exceeded --max-runtime.
 unknown         Job state is missing or cannot be verified.
 ```
 

@@ -27,6 +27,9 @@ Usage: fake claude
 HELP
   exit 0
 fi
+if [ -n "${FAKE_PID_FILE:-}" ]; then
+  printf '%s\n' "$$" > "$FAKE_PID_FILE"
+fi
 
 case "${FAKE_BEHAVIOR:-success}" in
   success)
@@ -47,6 +50,11 @@ case "${FAKE_BEHAVIOR:-success}" in
   fail)
     printf 'fake failure\n' >&2
     exit 42
+    ;;
+  slow)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    sleep 30
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
     ;;
   *)
     printf 'unknown fake behavior: %s\n' "$FAKE_BEHAVIOR" >&2
@@ -77,6 +85,35 @@ assert_not_contains() {
     *"$needle"*) fail "expected [$haystack] not to contain [$needle]" ;;
     *) ;;
   esac
+}
+
+wait_for_status() {
+  local work="$1"
+  local job="$2"
+  local pattern="$3"
+  local status_text=""
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    status_text="$("$CC_WATCH" status "$job" --cwd "$work" 2>/dev/null || true)"
+    case "$status_text" in
+      *"$pattern"*)
+        printf '%s\n' "$status_text"
+        return 0
+        ;;
+    esac
+    sleep 0.2
+  done
+  fail "job $job did not reach status pattern [$pattern], last status [$status_text]"
+}
+
+wait_for_file() {
+  local path="$1"
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$path" ] && return 0
+    sleep 0.2
+  done
+  fail "file was not written: $path"
 }
 
 new_workdir() {
@@ -158,6 +195,18 @@ fi
 partial_result_args="$(run_success_with_behavior partial-result partial-result)"
 assert_contains "$partial_result_args" "--tools Read,Grep,Glob,LS"
 
+timeout_work="$(new_workdir timeout)"
+timeout_args="$TMP_ROOT/timeout.args"
+timeout_output="$TMP_ROOT/timeout.out"
+if FAKE_ARGS_LOG="$timeout_args" FAKE_BEHAVIOR=slow \
+  "$CC_WATCH" run --cwd "$timeout_work" --claude "$FAKE_CLAUDE" --max-runtime 1 -- "review only" > "$timeout_output" 2>&1; then
+  fail "timeout run should fail"
+fi
+assert_contains "$(cat "$timeout_output")" "status=timed-out"
+timeout_status="$("$CC_WATCH" status "$(cat "$timeout_work/.cc-watch"/*/job_id)" --cwd "$timeout_work" || true)"
+assert_contains "$timeout_status" "timed-out"
+assert_contains "$timeout_status" "elapsed="
+
 fail_work="$(new_workdir fail)"
 fail_args="$TMP_ROOT/fail.args"
 if FAKE_ARGS_LOG="$fail_args" FAKE_BEHAVIOR=fail \
@@ -182,5 +231,30 @@ assert_contains "$doctor_text" "flag_permission_mode=yes"
 assert_contains "$doctor_text" "ANTHROPIC_API_KEY=REDACTED"
 assert_not_contains "$doctor_text" "dummy-secret"
 assert_contains "$doctor_text" "state_git_ignored=not-git"
+
+async_work="$(new_workdir async-success)"
+async_args="$TMP_ROOT/async-success.args"
+async_job="$(FAKE_ARGS_LOG="$async_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" start --cwd "$async_work" --claude "$FAKE_CLAUDE" -- "review only")"
+async_status="$(wait_for_status "$async_work" "$async_job" "finished")"
+assert_contains "$async_status" "elapsed="
+async_result="$("$CC_WATCH" result "$async_job" --cwd "$async_work")"
+assert_contains "$async_result" "fake final review"
+
+cancel_work="$(new_workdir async-cancel)"
+cancel_args="$TMP_ROOT/async-cancel.args"
+cancel_pid_file="$TMP_ROOT/async-cancel.pid"
+cancel_job="$(FAKE_ARGS_LOG="$cancel_args" FAKE_BEHAVIOR=slow FAKE_PID_FILE="$cancel_pid_file" \
+  "$CC_WATCH" start --cwd "$cancel_work" --claude "$FAKE_CLAUDE" -- "review only")"
+wait_for_file "$cancel_pid_file"
+cancel_fake_pid="$(cat "$cancel_pid_file")"
+wait_for_status "$cancel_work" "$cancel_job" "running-" >/dev/null
+cancel_text="$("$CC_WATCH" cancel "$cancel_job" --cwd "$cancel_work")"
+assert_contains "$cancel_text" "canceled job=$cancel_job"
+cancel_status="$("$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" || true)"
+assert_contains "$cancel_status" "canceled"
+if kill -0 "$cancel_fake_pid" 2>/dev/null; then
+  fail "cancel left fake Claude process alive: $cancel_fake_pid"
+fi
 
 printf 'test_cc_watch ok\n'

@@ -75,7 +75,7 @@ scripts/cc-watch run --persist-session --cwd . -- "Start a reusable review threa
 scripts/cc-watch run --resume <session-id> --cwd . -- "Continue that review."
 ```
 
-For long work:
+For long work from a persistent terminal or one shell script:
 
 ```bash
 job_id="$(scripts/cc-watch start --cwd . -- "Investigate this repo and report risks.")"
@@ -83,8 +83,11 @@ scripts/cc-watch status "$job_id"
 scripts/cc-watch result "$job_id"
 ```
 
-Use `status` while waiting. `running-quiet` means Claude is still alive but has
-not emitted stream-json recently; do not treat it as failure.
+When running inside Codex tool calls, prefer foreground `run` unless the shell
+will remain alive; some command runners clean background children when the tool
+call exits. Use `status` while waiting. `running-quiet` means Claude is still
+alive but has not emitted stream-json recently; do not treat it as failure. Use
+`--max-runtime SEC` to bound long Opus jobs when needed.
 
 ## Prompt Shape
 
