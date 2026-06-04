@@ -24,6 +24,12 @@ Run directly from this checkout:
 claude-code-companion/scripts/cc-watch run --cwd . -- "Review the current changes."
 ```
 
+Check local readiness without sending a model request:
+
+```bash
+claude-code-companion/scripts/cc-watch doctor --cwd .
+```
+
 For longer tasks:
 
 ```bash
@@ -39,6 +45,30 @@ Runtime state for async jobs is written only under the target working directory:
 ```
 
 You can remove that directory at any time after jobs finish.
+
+The state directory writes its own `.gitignore` and this repo ignores
+`.cc-watch/`, so prompts and raw stream logs should not be committed by
+accident.
+
+## Security Model
+
+`cc-watch` treats Claude Code as a read-only reviewer by default:
+
+- Allowed built-in tools: `Read`, `Grep`, `Glob`, `LS` when supported by Claude.
+- MCP config is disabled by default with a strict empty MCP config.
+- Session persistence is disabled by default with `--no-session-persistence`.
+- Raw `stream-json` is saved locally but only the final result is printed.
+
+Use explicit opt-ins only when needed:
+
+```bash
+claude-code-companion/scripts/cc-watch run --allow-bash --cwd . -- "Inspect git diff read-only."
+claude-code-companion/scripts/cc-watch run --allow-mcp --cwd . -- "Use configured MCP read-only."
+claude-code-companion/scripts/cc-watch run --read-write --cwd . -- "Take over edits."
+```
+
+Do not use `--read-write` for ordinary Codex/Claude collaboration. Prefer
+having Codex pass the relevant diff or file excerpts in the prompt.
 
 `cc-watch` passes `--no-session-persistence` to Claude Code by default. Use
 `--persist-session` only when you explicitly want Claude Code to save a
@@ -56,16 +86,28 @@ claude-code-companion/scripts/cc-watch run --continue --cwd . -- "Continue Claud
 
 This repository does not create `.agents/skills` for you.
 
-To install repo-locally, copy or symlink `claude-code-companion/` into the target
-repository's Codex skills directory:
+For local development, symlink `claude-code-companion/` into your personal Codex
+skills directory:
 
-```text
-<target-repo>/.agents/skills/claude-code-companion/
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s /path/to/codex-cc-plugin/claude-code-companion \
+  "${CODEX_HOME:-$HOME/.codex}/skills/claude-code-companion"
 ```
 
-To install for personal use across repositories, copy it into your user Codex
-skills directory. Do that manually only when you are comfortable with that
-user-level write.
+For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
+
+```bash
+python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo DarthVaderW/claude-code-companion-skill \
+  --path claude-code-companion \
+  --ref v0.2.0
+```
+
+Restart Codex after installing or updating skills.
+
+This project is not a `uvx` tool. Do not add `pyproject.toml` or a Python
+package only to install this skill.
 
 ## Requirements
 

@@ -29,7 +29,12 @@ Do not call Claude for tiny tasks where Codex can answer directly.
 - Include `cwd`, branch/base, task goal, constraints, relevant commands, and
   what output you need.
 - Default to highest effort unless the user asks for a faster pass.
-- Treat Claude as read-only by default.
+- Treat Claude as read-only by default. The helper allows only local read tools
+  by default and disables MCP config unless `--allow-mcp` is explicit.
+- Prefer passing diffs, file lists, or command output in the prompt. Use
+  `--allow-bash` only when Claude genuinely needs shell access.
+- Use `--read-write` only when the user explicitly asks Claude Code to take over
+  edits. Codex should normally remain the writer.
 - Use the helper's default fresh non-persistent print-mode session for one-off
   reviews. Pass `--persist-session` when a new Claude session should be
   resumable, `--resume <session-id>` to continue a known session, or
@@ -55,6 +60,12 @@ For short synchronous work:
 
 ```bash
 scripts/cc-watch run --cwd . -- "Review the current diff. Return only actionable findings."
+```
+
+Before diagnosing auth, proxy, PATH, or CLI flag issues:
+
+```bash
+scripts/cc-watch doctor --cwd .
 ```
 
 For resumable work:
