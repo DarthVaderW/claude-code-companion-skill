@@ -36,6 +36,14 @@ case "${FAKE_BEHAVIOR:-success}" in
   no-result)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
     ;;
+  error-result)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"session_id":"11111111-1111-1111-1111-111111111111","result":"fake auth error"}'
+    ;;
+  partial-result)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
   fail)
     printf 'fake failure\n' >&2
     exit 42
@@ -77,18 +85,25 @@ new_workdir() {
   printf '%s\n' "$dir"
 }
 
-run_success() {
+run_success_with_behavior() {
   local label="$1"
-  shift
+  local behavior="$2"
+  shift 2
   local work args_log output
   work="$(new_workdir "$label")"
   args_log="$TMP_ROOT/$label.args"
   output="$TMP_ROOT/$label.out"
-  FAKE_ARGS_LOG="$args_log" FAKE_BEHAVIOR=success \
+  FAKE_ARGS_LOG="$args_log" FAKE_BEHAVIOR="$behavior" \
     "$CC_WATCH" run --cwd "$work" --claude "$FAKE_CLAUDE" "$@" -- "review only" > "$output"
   assert_contains "$(cat "$output")" "fake final review"
   [ -f "$work/.cc-watch/.gitignore" ] || fail "missing state .gitignore"
   tail -1 "$args_log"
+}
+
+run_success() {
+  local label="$1"
+  shift
+  run_success_with_behavior "$label" success "$@"
 }
 
 default_args="$(run_success default)"
@@ -132,6 +147,16 @@ if FAKE_ARGS_LOG="$no_result_args" FAKE_BEHAVIOR=no-result \
   "$CC_WATCH" run --cwd "$no_result_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
   fail "no-result run should fail"
 fi
+
+error_result_work="$(new_workdir error-result)"
+error_result_args="$TMP_ROOT/error-result.args"
+if FAKE_ARGS_LOG="$error_result_args" FAKE_BEHAVIOR=error-result \
+  "$CC_WATCH" run --cwd "$error_result_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
+  fail "error-result run should fail"
+fi
+
+partial_result_args="$(run_success_with_behavior partial-result partial-result)"
+assert_contains "$partial_result_args" "--tools Read,Grep,Glob,LS"
 
 fail_work="$(new_workdir fail)"
 fail_args="$TMP_ROOT/fail.args"

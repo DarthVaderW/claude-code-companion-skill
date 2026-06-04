@@ -435,7 +435,8 @@ worker() {
   write_file "$JOB_DIR/claude_pid" "$claude_pid"
 
   local line ts saw_result=0
-  while IFS= read -r line; do
+  local result_is_error=0 result_subtype=""
+  while IFS= read -r line || [ -n "$line" ]; do
     ts="$(now_epoch)"
     write_file "$JOB_DIR/last_event_at" "$ts"
     update_running_status "$ts"
@@ -444,6 +445,8 @@ worker() {
       saw_result=1
       printf '%s\n' "$line" > "$final_line_file"
       extract_result_line "$line" > "$result_file"
+      result_is_error="$(printf '%s' "$line" | json_field_from_stdin is_error 2>/dev/null || true)"
+      result_subtype="$(printf '%s' "$line" | json_field_from_stdin subtype 2>/dev/null || true)"
     fi
   done < "$fifo"
 
@@ -457,6 +460,12 @@ worker() {
   rm -f "$fifo"
 
   if [ "$exit_code" = "0" ] && [ "$saw_result" = "1" ]; then
+    if [ "$result_is_error" = "1" ] || printf '%s' "$result_subtype" | grep -q '^error'; then
+      write_file "$JOB_DIR/status" "failed"
+      printf 'Claude final result was an error event: subtype=%s is_error=%s\n' \
+        "$result_subtype" "$result_is_error" >> "$stderr_log"
+      return 1
+    fi
     write_file "$JOB_DIR/status" "finished"
     return 0
   fi
