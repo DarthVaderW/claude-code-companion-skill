@@ -3,7 +3,7 @@ set -u
 
 QUIET_AFTER_DEFAULT=60
 EFFORT_DEFAULT=max
-DISALLOWED_READONLY_TOOLS="Edit,MultiEdit,Write,NotebookEdit,Bash"
+ALLOWED_READONLY_TOOLS="Read,Grep,Glob,LS"
 
 usage() {
   cat <<'EOF'
@@ -20,7 +20,9 @@ Options:
   --model MODEL         Optional Claude model.
   --claude PATH         Claude binary. Default: $CLAUDE_BIN or claude.
   --quiet-after SEC     Seconds without stream events before running-quiet.
-  --allow-bash          Do not disallow Bash. Off by default.
+  --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
+  --allow-mcp           Load Claude Code MCP config instead of strict empty MCP.
+  --read-write          Allow Claude Code's default write-capable tools.
   --persist-session     Allow Claude Code to persist this print-mode session.
   --resume SESSION_ID   Resume a persisted Claude Code session.
   --continue            Continue Claude Code's most recent session for cwd.
@@ -93,6 +95,49 @@ is_pid_alive() {
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+resolve_claude_binary() {
+  if [ -z "$CLAUDE" ]; then
+    return 1
+  fi
+
+  if printf '%s' "$CLAUDE" | grep -q '/'; then
+    [ -x "$CLAUDE" ] || return 1
+    printf '%s\n' "$CLAUDE"
+    return 0
+  fi
+
+  local resolved
+  resolved="$(command -v "$CLAUDE" 2>/dev/null || true)"
+  if [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  if [ "$CLAUDE" = "claude" ] && [ -x "$HOME/.local/bin/claude" ]; then
+    printf '%s\n' "$HOME/.local/bin/claude"
+    return 0
+  fi
+
+  return 1
+}
+
+preflight_claude() {
+  local stderr_log="$1"
+  local resolved
+  resolved="$(resolve_claude_binary)" || {
+    printf 'Claude binary not found or not executable: %s\n' "$CLAUDE" >> "$stderr_log"
+    return 127
+  }
+
+  CLAUDE="$resolved"
+  write_file "$JOB_DIR/claude" "$CLAUDE"
+  "$CLAUDE" --version > "$JOB_DIR/claude_version" 2>> "$stderr_log" || {
+    local code="$?"
+    printf 'Claude version check failed for: %s\n' "$CLAUDE" >> "$stderr_log"
+    return "$code"
+  }
+}
+
 json_field_from_stdin() {
   local field="$1"
   perl -MJSON::PP -CS -e '
@@ -129,7 +174,9 @@ parse_run_options() {
   MODEL=""
   CLAUDE="${CLAUDE_BIN:-claude}"
   QUIET_AFTER="$QUIET_AFTER_DEFAULT"
-  READONLY=1
+  ALLOW_BASH=0
+  ALLOW_MCP=0
+  READ_WRITE=0
   NO_SESSION_PERSISTENCE=1
   RESUME_SESSION=""
   CONTINUE_SESSION=0
@@ -163,7 +210,15 @@ parse_run_options() {
         shift 2
         ;;
       --allow-bash)
-        READONLY=0
+        ALLOW_BASH=1
+        shift
+        ;;
+      --allow-mcp)
+        ALLOW_MCP=1
+        shift
+        ;;
+      --read-write)
+        READ_WRITE=1
         shift
         ;;
       --persist-session)
@@ -241,7 +296,14 @@ write_config() {
   write_file "$JOB_DIR/effort" "$EFFORT"
   write_file "$JOB_DIR/model" "$MODEL"
   write_file "$JOB_DIR/quiet_after" "$QUIET_AFTER"
-  write_file "$JOB_DIR/readonly" "$READONLY"
+  if [ "$READ_WRITE" = "1" ]; then
+    write_file "$JOB_DIR/readonly" "0"
+  else
+    write_file "$JOB_DIR/readonly" "1"
+  fi
+  write_file "$JOB_DIR/allow_bash" "$ALLOW_BASH"
+  write_file "$JOB_DIR/allow_mcp" "$ALLOW_MCP"
+  write_file "$JOB_DIR/read_write" "$READ_WRITE"
   write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
   write_file "$JOB_DIR/resume_session" "$RESUME_SESSION"
   write_file "$JOB_DIR/continue_session" "$CONTINUE_SESSION"
@@ -257,7 +319,12 @@ load_config() {
   EFFORT="$(read_file "$JOB_DIR/effort")"
   MODEL="$(read_file "$JOB_DIR/model")"
   QUIET_AFTER="$(read_file "$JOB_DIR/quiet_after")"
-  READONLY="$(read_file "$JOB_DIR/readonly")"
+  ALLOW_BASH="$(read_file "$JOB_DIR/allow_bash")"
+  ALLOW_MCP="$(read_file "$JOB_DIR/allow_mcp")"
+  READ_WRITE="$(read_file "$JOB_DIR/read_write")"
+  [ -n "$ALLOW_BASH" ] || ALLOW_BASH=0
+  [ -n "$ALLOW_MCP" ] || ALLOW_MCP=0
+  [ -n "$READ_WRITE" ] || READ_WRITE=0
   NO_SESSION_PERSISTENCE="$(read_file "$JOB_DIR/no_session_persistence")"
   RESUME_SESSION="$(read_file "$JOB_DIR/resume_session")"
   CONTINUE_SESSION="$(read_file "$JOB_DIR/continue_session")"
@@ -275,8 +342,15 @@ build_claude_args() {
   elif [ "$NO_SESSION_PERSISTENCE" = "1" ]; then
     CLAUDE_ARGS+=(--no-session-persistence)
   fi
-  if [ "$READONLY" = "1" ]; then
-    CLAUDE_ARGS+=(--disallowed-tools "$DISALLOWED_READONLY_TOOLS")
+  if [ "$READ_WRITE" != "1" ]; then
+    local allowed_tools="$ALLOWED_READONLY_TOOLS"
+    if [ "$ALLOW_BASH" = "1" ]; then
+      allowed_tools="$allowed_tools,Bash"
+    fi
+    CLAUDE_ARGS+=(--tools "$allowed_tools")
+  fi
+  if [ "$ALLOW_MCP" != "1" ]; then
+    CLAUDE_ARGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
   fi
 }
 
@@ -311,6 +385,13 @@ worker() {
   : > "$stdout_log"
   : > "$result_file"
   rm -f "$exit_code_file" "$final_line_file"
+
+  preflight_claude "$stderr_log" || {
+    local code="$?"
+    write_file "$JOB_DIR/exit_code" "$code"
+    write_file "$JOB_DIR/status" "failed"
+    return "$code"
+  }
 
   build_claude_args
   write_file "$JOB_DIR/status" "running-quiet"
