@@ -30,8 +30,10 @@ Do not call Claude for tiny tasks where Codex can answer directly.
   what output you need.
 - Default to highest effort unless the user asks for a faster pass.
 - Treat Claude as read-only by default.
-- Use the helper's default non-persistent print-mode session. Only pass
-  `--persist-session` when the user explicitly wants Claude Code resume state.
+- Use the helper's default fresh non-persistent print-mode session for one-off
+  reviews. Pass `--persist-session` when a new Claude session should be
+  resumable, `--resume <session-id>` to continue a known session, or
+  `--continue` only when continuing Claude's latest cwd session is intended.
 - Do not let Claude and Codex edit the same files at the same time unless the
   user explicitly asks for a handoff.
 - Do not expose secrets. Never ask Claude to print env values. If env checking
@@ -53,6 +55,13 @@ For short synchronous work:
 
 ```bash
 scripts/cc-watch run --cwd . -- "Review the current diff. Return only actionable findings."
+```
+
+For resumable work:
+
+```bash
+scripts/cc-watch run --persist-session --cwd . -- "Start a reusable review thread."
+scripts/cc-watch run --resume <session-id> --cwd . -- "Continue that review."
 ```
 
 For long work:

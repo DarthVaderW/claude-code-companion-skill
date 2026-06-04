@@ -22,6 +22,8 @@ Options:
   --quiet-after SEC     Seconds without stream events before running-quiet.
   --allow-bash          Do not disallow Bash. Off by default.
   --persist-session     Allow Claude Code to persist this print-mode session.
+  --resume SESSION_ID   Resume a persisted Claude Code session.
+  --continue            Continue Claude Code's most recent session for cwd.
   --                    End options; remaining text is the prompt.
 
 The script consumes Claude's raw stream-json output and prints only compact
@@ -121,6 +123,8 @@ parse_run_options() {
   QUIET_AFTER="$QUIET_AFTER_DEFAULT"
   READONLY=1
   NO_SESSION_PERSISTENCE=1
+  RESUME_SESSION=""
+  CONTINUE_SESSION=0
   PROMPT_ARGS=()
 
   while [ "$#" -gt 0 ]; do
@@ -158,6 +162,17 @@ parse_run_options() {
         NO_SESSION_PERSISTENCE=0
         shift
         ;;
+      --resume)
+        [ "$#" -ge 2 ] || die "--resume requires a session id"
+        RESUME_SESSION="$2"
+        NO_SESSION_PERSISTENCE=0
+        shift 2
+        ;;
+      --continue)
+        CONTINUE_SESSION=1
+        NO_SESSION_PERSISTENCE=0
+        shift
+        ;;
       --)
         shift
         PROMPT_ARGS=("$@")
@@ -172,6 +187,10 @@ parse_run_options() {
         ;;
     esac
   done
+
+  if [ -n "$RESUME_SESSION" ] && [ "$CONTINUE_SESSION" = "1" ]; then
+    die "--resume and --continue cannot be used together"
+  fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
 }
@@ -215,6 +234,8 @@ write_config() {
   write_file "$JOB_DIR/quiet_after" "$QUIET_AFTER"
   write_file "$JOB_DIR/readonly" "$READONLY"
   write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
+  write_file "$JOB_DIR/resume_session" "$RESUME_SESSION"
+  write_file "$JOB_DIR/continue_session" "$CONTINUE_SESSION"
   write_file "$JOB_DIR/status" "starting"
   write_file "$JOB_DIR/started_at" "$(now_epoch)"
   write_file "$JOB_DIR/last_event_at" "0"
@@ -229,6 +250,8 @@ load_config() {
   QUIET_AFTER="$(read_file "$JOB_DIR/quiet_after")"
   READONLY="$(read_file "$JOB_DIR/readonly")"
   NO_SESSION_PERSISTENCE="$(read_file "$JOB_DIR/no_session_persistence")"
+  RESUME_SESSION="$(read_file "$JOB_DIR/resume_session")"
+  CONTINUE_SESSION="$(read_file "$JOB_DIR/continue_session")"
 }
 
 build_claude_args() {
@@ -236,7 +259,11 @@ build_claude_args() {
   if [ -n "$MODEL" ]; then
     CLAUDE_ARGS+=(--model "$MODEL")
   fi
-  if [ "$NO_SESSION_PERSISTENCE" = "1" ]; then
+  if [ -n "$RESUME_SESSION" ]; then
+    CLAUDE_ARGS+=(--resume "$RESUME_SESSION")
+  elif [ "$CONTINUE_SESSION" = "1" ]; then
+    CLAUDE_ARGS+=(--continue)
+  elif [ "$NO_SESSION_PERSISTENCE" = "1" ]; then
     CLAUDE_ARGS+=(--no-session-persistence)
   fi
   if [ "$READONLY" = "1" ]; then
@@ -330,6 +357,7 @@ render_status() {
   }
 
   local status worker_pid claude_pid last_event quiet_after now delta rendered exit_code session
+  local no_session_persistence session_resumable
   status="$(read_file "$JOB_DIR/status")"
   worker_pid="$(read_file "$JOB_DIR/worker_pid")"
   claude_pid="$(read_file "$JOB_DIR/claude_pid")"
@@ -337,6 +365,7 @@ render_status() {
   quiet_after="$(read_file "$JOB_DIR/quiet_after")"
   exit_code="$(read_file "$JOB_DIR/exit_code")"
   session="$(read_file "$JOB_DIR/session_id")"
+  no_session_persistence="$(read_file "$JOB_DIR/no_session_persistence")"
 
   [ -n "$last_event" ] || last_event=0
   [ -n "$quiet_after" ] || quiet_after="$QUIET_AFTER_DEFAULT"
@@ -360,7 +389,11 @@ render_status() {
   [ -n "$worker_pid" ] && printf ' worker_pid=%s' "$worker_pid"
   [ -n "$last_event" ] && [ "$last_event" != "0" ] && printf ' last_event_at=%s' "$last_event"
   [ -n "$exit_code" ] && printf ' exit_code=%s' "$exit_code"
-  [ -n "$session" ] && printf ' session_id=%s' "$session"
+  if [ -n "$session" ]; then
+    session_resumable=yes
+    [ "$no_session_persistence" = "1" ] && session_resumable=no
+    printf ' session_id=%s session_resumable=%s' "$session" "$session_resumable"
+  fi
   printf '\n'
 
   case "$rendered" in
@@ -383,7 +416,16 @@ cmd_run() {
   render_status >/dev/null || true
 
   if [ "$code" -eq 0 ]; then
-    printf '[cc] job=%s status=finished\n' "$JOB_ID"
+    local session no_session_persistence session_resumable
+    session="$(read_file "$JOB_DIR/session_id")"
+    no_session_persistence="$(read_file "$JOB_DIR/no_session_persistence")"
+    printf '[cc] job=%s status=finished' "$JOB_ID"
+    if [ -n "$session" ]; then
+      session_resumable=yes
+      [ "$no_session_persistence" = "1" ] && session_resumable=no
+      printf ' session_id=%s session_resumable=%s' "$session" "$session_resumable"
+    fi
+    printf '\n'
     cat "$JOB_DIR/result.txt"
     printf '\n'
   else

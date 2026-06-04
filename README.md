@@ -44,6 +44,14 @@ You can remove that directory at any time after jobs finish.
 `--persist-session` only when you explicitly want Claude Code to save a
 print-mode session for later resume.
 
+Resume modes are explicit:
+
+```bash
+claude-code-companion/scripts/cc-watch run --persist-session --cwd . -- "Start a reusable Claude thread."
+claude-code-companion/scripts/cc-watch run --resume <session-id> --cwd . -- "Continue that thread."
+claude-code-companion/scripts/cc-watch run --continue --cwd . -- "Continue Claude's latest cwd thread."
+```
+
 ## Install As A Codex Skill
 
 This repository does not create `.agents/skills` for you.
