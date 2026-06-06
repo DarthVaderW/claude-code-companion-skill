@@ -1,5 +1,23 @@
 # Changelog
 
+## Next
+
+- Add local job titles with `--title TITLE`; titles are stored in cc-watch
+  state and are not passed to Claude.
+- Add `transcript.md` for terminal jobs so Codex, CLI users, and future threads
+  can read a compact prompt/result record without opening raw stream JSON.
+- Add `cc-watch list` to enumerate project-local jobs from `.cc-watch/`.
+- Add `cc-watch show` to read the latest job, a job id, or the most recent
+  matching title as `result.txt`, `transcript.md`, `metadata.json`, or raw
+  `stdout.jsonl`.
+- Add `cc-watch resume JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT`; job/title
+  selectors require a persisted Claude session and fail clearly for default
+  non-persistent jobs.
+- Keep the project as a Codex skill unless the script grows into a true
+  cross-project CLI.
+- Prefer small reliability changes over adding daemons, queues, indexes, or a
+  Python package.
+
 ## v0.3.0 - 2026-06-06
 
 - Add durable result archives for every terminal job:
@@ -37,13 +55,6 @@
   shell remains alive for async polling.
 - Expand fake-Claude regression tests for `start/status/result/cancel`.
 - Remove an unused `readonly` state file to simplify job metadata.
-
-## Next
-
-- Keep the project as a Codex skill unless the script grows into a true
-  cross-project CLI.
-- Prefer small reliability changes over adding daemons, queues, or a Python
-  package.
 
 ## v0.2.0 - 2026-06-05
 

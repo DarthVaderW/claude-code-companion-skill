@@ -60,7 +60,7 @@ scripts/cc-watch
 For short synchronous work:
 
 ```bash
-scripts/cc-watch run --cwd . -- "Review the current diff. Return only actionable findings."
+scripts/cc-watch run --cwd . --title release-review -- "Review the current diff. Return only actionable findings."
 ```
 
 For long prompts:
@@ -81,9 +81,14 @@ scripts/cc-watch doctor --cwd .
 For resumable work:
 
 ```bash
-scripts/cc-watch run --persist-session --cwd . -- "Start a reusable review thread."
-scripts/cc-watch run --resume <session-id> --cwd . -- "Continue that review."
+scripts/cc-watch run --persist-session --cwd . --title repo-review -- "Start a reusable review thread."
+scripts/cc-watch resume --cwd . repo-review -- "Continue that review."
+scripts/cc-watch resume --cwd . <job-id> -- "Continue by job id."
+scripts/cc-watch resume --cwd . <session-id> -- "Continue by raw Claude session id."
 ```
+
+Default jobs use `--no-session-persistence` and are not resumable. Use
+`--persist-session` for any Claude thread that may need a later continuation.
 
 For long work from a persistent terminal or one shell script:
 
@@ -91,6 +96,9 @@ For long work from a persistent terminal or one shell script:
 job_id="$(scripts/cc-watch start --cwd . -- "Investigate this repo and report risks.")"
 scripts/cc-watch status "$job_id"
 scripts/cc-watch result "$job_id"
+scripts/cc-watch list --cwd .
+scripts/cc-watch show --cwd . --last
+scripts/cc-watch show --cwd . repo-review --transcript
 ```
 
 When running inside Codex tool calls, prefer foreground `run` unless the shell
@@ -99,12 +107,13 @@ call exits. Use `status` while waiting. `running-quiet` means Claude is still
 alive but has not emitted stream-json recently; do not treat it as failure. Use
 `--max-runtime SEC` to bound long Opus jobs when needed.
 
-Every terminal job writes `.cc-watch/<job-id>/result.txt`, `metadata.json`,
-`metadata.md`, `prompt.md`, `stdout.jsonl`, and `stderr.log`. Treat
-`result.txt` as the human-readable archive entry and `stdout.jsonl` as the
-lossless raw evidence. `result` prints `result.txt` for any terminal job and
-exits non-zero for failed, timed-out, or canceled jobs. `status` returns zero
-for running jobs by default; use `--strict-exit` only when a script needs
+Every terminal job writes `.cc-watch/<job-id>/result.txt`, `transcript.md`,
+`metadata.json`, `metadata.md`, `prompt.md`, `stdout.jsonl`, and `stderr.log`.
+Treat `result.txt` as the human-readable archive entry, `transcript.md` as the
+prompt-plus-answer view for future reading, and `stdout.jsonl` as the lossless
+raw evidence. `result` prints `result.txt` for any terminal job and exits
+non-zero for failed, timed-out, or canceled jobs. `status` returns zero for
+running jobs by default; use `--strict-exit` only when a script needs
 polling-style non-zero exits.
 
 ## Prompt Shape

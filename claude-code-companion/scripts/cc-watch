@@ -13,11 +13,15 @@ Usage:
   cc-watch start [options] -- PROMPT
   cc-watch status <job-id> [--cwd DIR] [--strict-exit]
   cc-watch result <job-id> [--cwd DIR]
+  cc-watch list [--cwd DIR]
+  cc-watch show [--cwd DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
+  cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
   cc-watch cancel <job-id> [--cwd DIR]
   cc-watch doctor [options]
 
 Options:
   --cwd DIR             Target working directory. Default: current directory.
+  --title TITLE         Human-readable local job title. Not passed to Claude.
   --effort LEVEL        Claude effort level. Default: max.
   --model MODEL         Optional Claude model.
   --claude PATH         Claude binary. Default: $CLAUDE_BIN or claude.
@@ -35,7 +39,8 @@ Options:
 The script consumes Claude's raw stream-json output and prints only compact
 status plus the final result. Async state is stored under <cwd>/.cc-watch/.
 Every terminal job writes a human-readable result.txt plus machine-readable
-metadata.json and metadata.md. Raw stdout.jsonl and stderr.log are retained.
+metadata.json, metadata.md, and transcript.md. Raw stdout.jsonl and stderr.log
+are retained.
 EOF
 }
 
@@ -119,6 +124,19 @@ validate_nonnegative_int() {
   esac
 }
 
+validate_title() {
+  local title="$1"
+  [ -n "$title" ] || die "--title requires a non-empty value"
+  case "$title" in
+    */*) die "--title cannot contain /" ;;
+    *'
+'*) die "--title cannot contain newlines" ;;
+  esac
+  if printf '%s' "$title" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "--title cannot contain control characters"
+  fi
+}
+
 resolve_claude_binary() {
   if [ -z "$CLAUDE" ]; then
     return 1
@@ -194,6 +212,7 @@ parse_prompt() {
 
 parse_run_options() {
   CWD="."
+  TITLE=""
   EFFORT="$EFFORT_DEFAULT"
   MODEL=""
   CLAUDE="${CLAUDE_BIN:-claude}"
@@ -205,6 +224,7 @@ parse_run_options() {
   NO_SESSION_PERSISTENCE=1
   RESUME_SESSION=""
   CONTINUE_SESSION=0
+  RESUMED_FROM=""
   PROMPT_FILE=""
   PROMPT_ARGS=()
 
@@ -213,6 +233,12 @@ parse_run_options() {
       --cwd)
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
+        shift 2
+        ;;
+      --title)
+        [ "$#" -ge 2 ] || die "--title requires a value"
+        TITLE="$2"
+        validate_title "$TITLE"
         shift 2
         ;;
       --effort)
@@ -369,6 +395,7 @@ write_config() {
   ensure_state_root "$(state_root_for "$CWD")"
   mkdir -p "$JOB_DIR" || die "cannot create job dir: $JOB_DIR"
   write_file "$JOB_DIR/job_id" "$JOB_ID"
+  write_file "$JOB_DIR/title" "$TITLE"
   write_file "$JOB_DIR/cwd" "$CWD"
   write_file "$JOB_DIR/claude" "$CLAUDE"
   write_file "$JOB_DIR/effort" "$EFFORT"
@@ -381,6 +408,7 @@ write_config() {
   write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
   write_file "$JOB_DIR/resume_session" "$RESUME_SESSION"
   write_file "$JOB_DIR/continue_session" "$CONTINUE_SESSION"
+  write_file "$JOB_DIR/resumed_from" "$RESUMED_FROM"
   write_file "$JOB_DIR/prompt_file" "$PROMPT_FILE"
   write_file "$JOB_DIR/status" "starting"
   write_file "$JOB_DIR/started_at" "$(now_epoch)"
@@ -396,6 +424,7 @@ write_config() {
 
 load_config() {
   JOB_ID="$(read_file "$JOB_DIR/job_id")"
+  TITLE="$(read_file "$JOB_DIR/title")"
   CWD="$(read_file "$JOB_DIR/cwd")"
   CLAUDE="$(read_file "$JOB_DIR/claude")"
   EFFORT="$(read_file "$JOB_DIR/effort")"
@@ -412,6 +441,7 @@ load_config() {
   NO_SESSION_PERSISTENCE="$(read_file "$JOB_DIR/no_session_persistence")"
   RESUME_SESSION="$(read_file "$JOB_DIR/resume_session")"
   CONTINUE_SESSION="$(read_file "$JOB_DIR/continue_session")"
+  RESUMED_FROM="$(read_file "$JOB_DIR/resumed_from")"
   PROMPT_FILE="$(read_file "$JOB_DIR/prompt_file")"
 }
 
@@ -462,14 +492,81 @@ wait_for_result_archive() {
   return 1
 }
 
+render_transcript() {
+  local reason="$1"
+  local status exit_code elapsed session title resumed_from prompt_file result_text_file stderr_log
+  status="$(read_file "$JOB_DIR/status")"
+  exit_code="$(status_exit_code)"
+  elapsed="$(job_elapsed_seconds)"
+  session="$(read_file "$JOB_DIR/session_id")"
+  title="$(read_file "$JOB_DIR/title")"
+  resumed_from="$(read_file "$JOB_DIR/resumed_from")"
+  prompt_file="$JOB_DIR/prompt.md"
+  result_text_file="$JOB_DIR/final-text.txt"
+  stderr_log="$JOB_DIR/stderr.log"
+
+  printf '# cc-watch transcript\n\n'
+  printf '## Job\n\n'
+  printf '%s\n' "- job: \`$JOB_ID\`"
+  if [ -n "$title" ]; then
+    printf '%s\n' "- title: \`$title\`"
+  fi
+  printf '%s\n' "- status: \`$status\`"
+  printf '%s\n' "- exit_code: \`$exit_code\`"
+  printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
+  printf '%s\n' "- cwd: \`$(read_file "$JOB_DIR/cwd")\`"
+  if [ -n "$session" ]; then
+    printf '%s\n' "- session_id: \`$session\`"
+  fi
+  if [ -n "$resumed_from" ]; then
+    printf '%s\n' "- resumed_from: \`$resumed_from\`"
+  fi
+  if [ -n "$reason" ]; then
+    printf '%s\n' "- reason: \`$reason\`"
+  fi
+
+  printf '\n## Prompt\n\n'
+  if [ -s "$prompt_file" ]; then
+    cat "$prompt_file"
+    printf '\n'
+  else
+    printf '(No prompt captured.)\n'
+  fi
+
+  printf '\n## Claude\n\n'
+  if [ -s "$result_text_file" ]; then
+    cat "$result_text_file"
+    printf '\n'
+  elif [ "$status" = "finished" ] && [ -s "$JOB_DIR/final-result.json" ]; then
+    printf '(Claude returned an empty final result.)\n'
+  else
+    printf 'NO FINAL RESULT\n'
+  fi
+
+  if [ -s "$stderr_log" ]; then
+    printf '\n## stderr tail\n\n```text\n'
+    tail -40 "$stderr_log"
+    printf '\n```\n'
+  fi
+}
+
+write_transcript_file() {
+  local reason="$1"
+  local tmp_transcript="$JOB_DIR/transcript.md.$$"
+  render_transcript "$reason" > "$tmp_transcript"
+  mv "$tmp_transcript" "$JOB_DIR/transcript.md"
+}
+
 write_metadata_files() {
-  local status exit_code started_at finished_at elapsed session session_resumable
+  local status exit_code started_at finished_at elapsed session session_resumable title resumed_from
   status="$(read_file "$JOB_DIR/status")"
   exit_code="$(status_exit_code)"
   started_at="$(read_file "$JOB_DIR/started_at")"
   finished_at="$(read_file "$JOB_DIR/finished_at")"
   elapsed="$(job_elapsed_seconds)"
   session="$(read_file "$JOB_DIR/session_id")"
+  title="$(read_file "$JOB_DIR/title")"
+  resumed_from="$(read_file "$JOB_DIR/resumed_from")"
   session_resumable=no
   if [ -n "$session" ] && [ "$(read_file "$JOB_DIR/no_session_persistence")" != "1" ]; then
     session_resumable=yes
@@ -479,6 +576,7 @@ write_metadata_files() {
   {
     printf '{\n'
     printf '  "job_id": %s,\n' "$(printf '%s' "$JOB_ID" | json_string)"
+    printf '  "title": %s,\n' "$(printf '%s' "$title" | json_string)"
     printf '  "status": %s,\n' "$(printf '%s' "$status" | json_string)"
     printf '  "exit_code": %s,\n' "$exit_code"
     printf '  "cwd": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/cwd")" | json_string)"
@@ -490,6 +588,7 @@ write_metadata_files() {
     printf '  "elapsed_seconds": %s,\n' "$elapsed"
     printf '  "session_id": %s,\n' "$(printf '%s' "$session" | json_string)"
     printf '  "session_resumable": %s,\n' "$(printf '%s' "$session_resumable" | json_string)"
+    printf '  "resumed_from": %s,\n' "$(printf '%s' "$resumed_from" | json_string)"
     printf '  "allow_bash": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_bash")" | json_string)"
     printf '  "allow_mcp": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_mcp")" | json_string)"
     printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
@@ -502,6 +601,9 @@ write_metadata_files() {
   {
     printf '# cc-watch metadata\n\n'
     printf '%s\n' "- job: \`$JOB_ID\`"
+    if [ -n "$title" ]; then
+      printf '%s\n' "- title: \`$title\`"
+    fi
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
@@ -512,17 +614,22 @@ write_metadata_files() {
       printf '%s\n' "- session_id: \`$session\`"
       printf '%s\n' "- session_resumable: \`$session_resumable\`"
     fi
+    if [ -n "$resumed_from" ]; then
+      printf '%s\n' "- resumed_from: \`$resumed_from\`"
+    fi
   } > "$tmp_md"
   mv "$tmp_md" "$JOB_DIR/metadata.md"
 }
 
 write_result_archive() {
   local reason="$1"
-  local status exit_code elapsed session result_text_file stderr_log stdout_log
+  local status exit_code elapsed session title resumed_from result_text_file stderr_log stdout_log
   status="$(read_file "$JOB_DIR/status")"
   exit_code="$(status_exit_code)"
   elapsed="$(job_elapsed_seconds)"
   session="$(read_file "$JOB_DIR/session_id")"
+  title="$(read_file "$JOB_DIR/title")"
+  resumed_from="$(read_file "$JOB_DIR/resumed_from")"
   result_text_file="$JOB_DIR/final-text.txt"
   stderr_log="$JOB_DIR/stderr.log"
   stdout_log="$JOB_DIR/stdout.jsonl"
@@ -533,6 +640,9 @@ write_result_archive() {
   {
     printf '# cc-watch result\n\n'
     printf '%s\n' "- job: \`$JOB_ID\`"
+    if [ -n "$title" ]; then
+      printf '%s\n' "- title: \`$title\`"
+    fi
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
@@ -541,6 +651,9 @@ write_result_archive() {
     printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
     if [ -n "$session" ]; then
       printf '%s\n' "- session_id: \`$session\`"
+    fi
+    if [ -n "$resumed_from" ]; then
+      printf '%s\n' "- resumed_from: \`$resumed_from\`"
     fi
     if [ -n "$reason" ]; then
       printf '%s\n' "- reason: \`$reason\`"
@@ -569,6 +682,7 @@ write_result_archive() {
     fi
   } > "$tmp_result"
   mv "$tmp_result" "$JOB_DIR/result.txt"
+  write_transcript_file "$reason"
 }
 
 build_claude_args() {
@@ -895,8 +1009,363 @@ render_status() {
   esac
 }
 
-cmd_run() {
-  parse_run_options "$@"
+parse_list_options() {
+  CWD="."
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+}
+
+job_started_at_or_zero() {
+  local value
+  value="$(read_file "$1/started_at")"
+  case "$value" in
+    ''|*[!0-9]*) printf '0\n' ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+latest_job_dir() {
+  local root latest_dir="" latest_started="-1" latest_job="" dir started job
+  root="$(state_root_for "$CWD")"
+  for dir in "$root"/*/; do
+    [ -f "$dir/job_id" ] || continue
+    started="$(job_started_at_or_zero "$dir")"
+    job="$(read_file "$dir/job_id")"
+    if [ "$started" -gt "$latest_started" ] || { [ "$started" -eq "$latest_started" ] && [ "$job" \> "$latest_job" ]; }; then
+      latest_started="$started"
+      latest_job="$job"
+      latest_dir="${dir%/}"
+    fi
+  done
+  [ -n "$latest_dir" ] || return 1
+  printf '%s\n' "$latest_dir"
+}
+
+find_job_dir_by_title() {
+  local title="$1"
+  local root latest_dir="" latest_started="-1" latest_job="" dir started job job_title
+  root="$(state_root_for "$CWD")"
+  for dir in "$root"/*/; do
+    [ -f "$dir/job_id" ] || continue
+    job_title="$(read_file "$dir/title")"
+    [ "$job_title" = "$title" ] || continue
+    started="$(job_started_at_or_zero "$dir")"
+    job="$(read_file "$dir/job_id")"
+    if [ "$started" -gt "$latest_started" ] || { [ "$started" -eq "$latest_started" ] && [ "$job" \> "$latest_job" ]; }; then
+      latest_started="$started"
+      latest_job="$job"
+      latest_dir="${dir%/}"
+    fi
+  done
+  [ -n "$latest_dir" ] || return 1
+  printf '%s\n' "$latest_dir"
+}
+
+looks_like_session_id() {
+  case "$1" in
+    ????????-????-????-????-????????????) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_job_selector() {
+  local selector="$1"
+  local root direct
+  root="$(state_root_for "$CWD")"
+  if [ -z "$selector" ]; then
+    latest_job_dir
+    return
+  fi
+
+  direct="$root/$selector"
+  if [ -f "$direct/job_id" ]; then
+    printf '%s\n' "$direct"
+    return 0
+  fi
+
+  find_job_dir_by_title "$selector"
+}
+
+job_status_word() {
+  local status_line
+  status_line="$(render_status 2>/dev/null || true)"
+  printf '%s\n' "${status_line%% *}"
+}
+
+cmd_list() {
+  parse_list_options "$@"
+
+  local root dir job title session no_session_persistence session_resumable status elapsed started
+  root="$(state_root_for "$CWD")"
+  [ -d "$root" ] || return 0
+
+  for dir in "$root"/*/; do
+    [ -f "$dir/job_id" ] || continue
+    JOB_DIR="${dir%/}"
+    JOB_ID="$(read_file "$JOB_DIR/job_id")"
+    job="$JOB_ID"
+    title="$(read_file "$JOB_DIR/title")"
+    session="$(read_file "$JOB_DIR/session_id")"
+    no_session_persistence="$(read_file "$JOB_DIR/no_session_persistence")"
+    session_resumable=no
+    if [ -n "$session" ] && [ "$no_session_persistence" != "1" ]; then
+      session_resumable=yes
+    fi
+    status="$(job_status_word)"
+    elapsed="$(job_elapsed_seconds)"
+    started="$(job_started_at_or_zero "$JOB_DIR")"
+    [ -n "$title" ] || title="-"
+    [ -n "$session" ] || session="-"
+    printf '%s\tjob=%s status=%s elapsed=%s title=%s session_id=%s session_resumable=%s\n' \
+      "$started" "$job" "$status" "$elapsed" "$title" "$session" "$session_resumable"
+  done | sort -rn | cut -f2-
+}
+
+parse_show_options() {
+  CWD="."
+  SHOW_SELECTOR=""
+  SHOW_LAST=0
+  SHOW_VIEW="result"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --last)
+        [ -z "$SHOW_SELECTOR" ] || die "--last cannot be combined with a selector"
+        SHOW_LAST=1
+        shift
+        ;;
+      --transcript)
+        [ "$SHOW_VIEW" = "result" ] || die "show view flags are mutually exclusive"
+        SHOW_VIEW="transcript"
+        shift
+        ;;
+      --metadata)
+        [ "$SHOW_VIEW" = "result" ] || die "show view flags are mutually exclusive"
+        SHOW_VIEW="metadata"
+        shift
+        ;;
+      --raw)
+        [ "$SHOW_VIEW" = "result" ] || die "show view flags are mutually exclusive"
+        SHOW_VIEW="raw"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        [ -z "$SHOW_SELECTOR" ] || die "show accepts only one selector"
+        [ "$SHOW_LAST" = "0" ] || die "--last cannot be combined with a selector"
+        SHOW_SELECTOR="$1"
+        shift
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+}
+
+cmd_show() {
+  parse_show_options "$@"
+
+  if [ "$SHOW_LAST" = "1" ] || [ -z "$SHOW_SELECTOR" ]; then
+    JOB_DIR="$(latest_job_dir)" || die "no cc-watch jobs in: $(state_root_for "$CWD")"
+  else
+    JOB_DIR="$(resolve_job_selector "$SHOW_SELECTOR")" || die "unknown job or title: $SHOW_SELECTOR"
+  fi
+  JOB_ID="$(read_file "$JOB_DIR/job_id")"
+
+  case "$SHOW_VIEW" in
+    result)
+      if [ -s "$JOB_DIR/result.txt" ]; then
+        cat "$JOB_DIR/result.txt"
+        printf '\n'
+      else
+        render_status
+      fi
+      ;;
+    transcript)
+      if [ -s "$JOB_DIR/transcript.md" ]; then
+        cat "$JOB_DIR/transcript.md"
+        printf '\n'
+      else
+        render_transcript ""
+      fi
+      ;;
+    metadata)
+      if [ -s "$JOB_DIR/metadata.json" ]; then
+        cat "$JOB_DIR/metadata.json"
+      else
+        render_status
+      fi
+      ;;
+    raw)
+      [ -f "$JOB_DIR/stdout.jsonl" ] || die "raw stdout not found for job: $JOB_ID"
+      cat "$JOB_DIR/stdout.jsonl"
+      ;;
+  esac
+}
+
+parse_resume_options() {
+  CWD="."
+  TITLE=""
+  EFFORT="$EFFORT_DEFAULT"
+  MODEL=""
+  CLAUDE="${CLAUDE_BIN:-claude}"
+  QUIET_AFTER="$QUIET_AFTER_DEFAULT"
+  MAX_RUNTIME="$MAX_RUNTIME_DEFAULT"
+  ALLOW_BASH=0
+  ALLOW_MCP=0
+  READ_WRITE=0
+  NO_SESSION_PERSISTENCE=0
+  RESUME_SESSION=""
+  CONTINUE_SESSION=0
+  RESUMED_FROM=""
+  PROMPT_FILE=""
+  PROMPT_ARGS=()
+  RESUME_SELECTOR=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --title)
+        [ "$#" -ge 2 ] || die "--title requires a value"
+        TITLE="$2"
+        validate_title "$TITLE"
+        shift 2
+        ;;
+      --effort)
+        [ "$#" -ge 2 ] || die "--effort requires a value"
+        EFFORT="$2"
+        shift 2
+        ;;
+      --model)
+        [ "$#" -ge 2 ] || die "--model requires a value"
+        MODEL="$2"
+        shift 2
+        ;;
+      --claude)
+        [ "$#" -ge 2 ] || die "--claude requires a value"
+        CLAUDE="$2"
+        shift 2
+        ;;
+      --prompt-file)
+        [ "$#" -ge 2 ] || die "--prompt-file requires a value"
+        PROMPT_FILE="$2"
+        shift 2
+        ;;
+      --quiet-after)
+        [ "$#" -ge 2 ] || die "--quiet-after requires a value"
+        QUIET_AFTER="$2"
+        validate_nonnegative_int "--quiet-after" "$QUIET_AFTER"
+        shift 2
+        ;;
+      --max-runtime)
+        [ "$#" -ge 2 ] || die "--max-runtime requires a value"
+        MAX_RUNTIME="$2"
+        validate_nonnegative_int "--max-runtime" "$MAX_RUNTIME"
+        shift 2
+        ;;
+      --allow-bash)
+        ALLOW_BASH=1
+        shift
+        ;;
+      --allow-mcp)
+        ALLOW_MCP=1
+        shift
+        ;;
+      --read-write)
+        READ_WRITE=1
+        shift
+        ;;
+      --persist-session|--resume|--continue)
+        die "resume manages Claude session state; do not pass $1"
+        ;;
+      --)
+        [ -n "$RESUME_SELECTOR" ] || die "resume requires a job id, title, or session id before --"
+        shift
+        PROMPT_ARGS=("$@")
+        break
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        [ -z "$RESUME_SELECTOR" ] || die "resume accepts only one selector before --"
+        RESUME_SELECTOR="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$RESUME_SELECTOR" ] || die "resume requires a job id, title, or session id"
+  if [ -n "$PROMPT_FILE" ] && [ "${#PROMPT_ARGS[@]}" -gt 0 ]; then
+    die "--prompt-file cannot be combined with prompt arguments"
+  fi
+  if [ -n "$PROMPT_FILE" ] && [ ! -f "$PROMPT_FILE" ]; then
+    die "prompt file not found: $PROMPT_FILE"
+  fi
+  if [ -z "$PROMPT_FILE" ] && [ "${#PROMPT_ARGS[@]}" -eq 0 ]; then
+    die "resume requires a prompt after -- or --prompt-file"
+  fi
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+}
+
+resolve_resume_session() {
+  local selector="$1"
+  local parent_dir parent_job parent_title parent_session no_session_persistence
+  if parent_dir="$(resolve_job_selector "$selector" 2>/dev/null)"; then
+    parent_job="$(read_file "$parent_dir/job_id")"
+    parent_title="$(read_file "$parent_dir/title")"
+    parent_session="$(read_file "$parent_dir/session_id")"
+    no_session_persistence="$(read_file "$parent_dir/no_session_persistence")"
+    [ -n "$parent_session" ] || die "prior job recorded no session id: $parent_job"
+    [ "$no_session_persistence" != "1" ] || die "prior job used --no-session-persistence; rerun it with --persist-session to enable resume"
+    RESUME_SESSION="$parent_session"
+    RESUMED_FROM="$parent_job"
+    if [ -z "$TITLE" ]; then
+      TITLE="$parent_title"
+    fi
+    return 0
+  fi
+
+  if looks_like_session_id "$selector"; then
+    RESUME_SESSION="$selector"
+    return 0
+  fi
+
+  die "unknown resumable job, title, or session id: $selector"
+}
+
+run_foreground_job() {
   JOB_ID="$(new_job_id)"
   JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
   write_config
@@ -928,6 +1397,17 @@ cmd_run() {
     cat "$JOB_DIR/result.txt" >&2 2>/dev/null || true
   fi
   return "$code"
+}
+
+cmd_run() {
+  parse_run_options "$@"
+  run_foreground_job
+}
+
+cmd_resume() {
+  parse_resume_options "$@"
+  resolve_resume_session "$RESUME_SELECTOR"
+  run_foreground_job
 }
 
 cmd_start() {
@@ -1064,7 +1544,10 @@ main() {
 
   case "$command" in
     run) cmd_run "$@" ;;
+    resume) cmd_resume "$@" ;;
     start) cmd_start "$@" ;;
+    list) cmd_list "$@" ;;
+    show) cmd_show "$@" ;;
     status)
       parse_job_options "$@"
       render_status

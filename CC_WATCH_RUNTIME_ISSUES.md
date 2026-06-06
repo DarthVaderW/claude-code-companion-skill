@@ -6,8 +6,7 @@ dumps, personal paths, or full Claude stream logs here.
 
 ## Current Status
 
-Resolved locally in `8e0c5b5` (`Harden cc-watch result archives`), but not yet
-released:
+Resolved in `v0.3.0`:
 
 - Terminal jobs now archive `result.txt`, `metadata.json`, `metadata.md`,
   `prompt.md`, `stdout.jsonl`, and `stderr.log`.
@@ -23,6 +22,13 @@ released:
   Opus reviews are slow or unreliable.
 - This repository ignores `.cc-watch/` job directories.
 
+In progress after `v0.3.0`:
+
+- Local job titles with `--title`.
+- `transcript.md` as a readable prompt/result view for future Codex threads.
+- `list`, `show`, and `resume` commands for project-local Claude collaboration
+  threads.
+
 ## Still Open
 
 1. Extract and show a small "last assistant text before failure" excerpt when a
@@ -31,7 +37,7 @@ released:
    `result.txt`.
 3. Add a lightweight `doctor` or `status` hint when the caller repository does
    not ignore `.cc-watch/`.
-4. Add job management helpers such as `list`, `prune`, or `archive`.
+4. Add job management helpers such as `prune` or `archive`.
 5. Consider an optional heartbeat for long foreground `run` jobs so Codex can
    distinguish slow progress from silence.
 6. Document the release and install/update path for GitHub-tagged skill

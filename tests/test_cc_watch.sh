@@ -152,6 +152,7 @@ run_success_with_behavior() {
     "$CC_WATCH" run --cwd "$work" --claude "$FAKE_CLAUDE" "$@" -- "review only" > "$output"
   assert_contains "$(cat "$output")" "fake final review"
   assert_contains "$(cat "$(job_dir_for_work "$work")/result.txt")" "# cc-watch result"
+  assert_contains "$(cat "$(job_dir_for_work "$work")/transcript.md")" "# cc-watch transcript"
   assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.json")" '"status": "finished"'
   assert_json_file "$(job_dir_for_work "$work")/metadata.json"
   assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.md")" "# cc-watch metadata"
@@ -191,6 +192,19 @@ assert_not_contains "$resume_args" "--no-session-persistence"
 continue_args="$(run_success continue --continue)"
 assert_contains "$continue_args" "--continue"
 assert_not_contains "$continue_args" "--no-session-persistence"
+
+title_args="$(run_success title --title "release review")"
+title_dir="$(job_dir_for_work "$TMP_ROOT/work-title")"
+assert_contains "$(cat "$title_dir/result.txt")" "- title: \`release review\`"
+assert_contains "$(cat "$title_dir/metadata.json")" '"title": "release review"'
+assert_contains "$(cat "$title_dir/transcript.md")" "## Prompt"
+assert_not_contains "$title_args" "--name"
+
+if FAKE_ARGS_LOG="$TMP_ROOT/bad-title.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$(new_workdir bad-title)" --claude "$FAKE_CLAUDE" \
+  --title "bad/title" -- "review only" >/dev/null 2>&1; then
+  fail "title with slash should fail"
+fi
 
 bad_work="$(new_workdir mutual-exclusion)"
 bad_args_log="$TMP_ROOT/mutual-exclusion.args"
@@ -370,6 +384,81 @@ async_status="$(wait_for_status "$async_work" "$async_job" "finished")"
 assert_contains "$async_status" "elapsed="
 async_result="$("$CC_WATCH" result "$async_job" --cwd "$async_work")"
 assert_contains "$async_result" "fake final review"
+
+empty_list_work="$(new_workdir empty-list)"
+empty_list="$("$CC_WATCH" list --cwd "$empty_list_work")"
+[ -z "$empty_list" ] || fail "empty list should print nothing"
+
+list_text="$("$CC_WATCH" list --cwd "$async_work")"
+assert_contains "$list_text" "job=$async_job"
+assert_contains "$list_text" "status=finished"
+assert_contains "$list_text" "session_resumable=no"
+
+show_last="$("$CC_WATCH" show --cwd "$async_work" --last)"
+assert_contains "$show_last" "fake final review"
+show_transcript="$("$CC_WATCH" show --cwd "$async_work" "$async_job" --transcript)"
+assert_contains "$show_transcript" "# cc-watch transcript"
+assert_contains "$show_transcript" "## Claude"
+show_metadata="$("$CC_WATCH" show --cwd "$async_work" "$async_job" --metadata)"
+assert_contains "$show_metadata" '"job_id"'
+show_raw="$("$CC_WATCH" show --cwd "$async_work" "$async_job" --raw)"
+assert_contains "$show_raw" '"type":"result"'
+
+persist_work="$(new_workdir resumable)"
+persist_args="$TMP_ROOT/resumable.args"
+FAKE_ARGS_LOG="$persist_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
+  --persist-session --title "resumable thread" -- "first review" > "$TMP_ROOT/resumable-first.out"
+persist_job="$(job_id_for_work "$persist_work")"
+persist_dir="$(job_dir_for_work "$persist_work")"
+assert_contains "$(cat "$persist_dir/metadata.json")" '"session_resumable": "yes"'
+persist_list="$("$CC_WATCH" list --cwd "$persist_work")"
+assert_contains "$persist_list" "title=resumable thread"
+assert_contains "$persist_list" "session_resumable=yes"
+
+resume_args_log="$TMP_ROOT/resumable-resume.args"
+FAKE_ARGS_LOG="$resume_args_log" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
+  "$persist_job" -- "continue review" > "$TMP_ROOT/resumable-resume.out"
+assert_contains "$(tail -1 "$resume_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
+assert_not_contains "$(tail -1 "$resume_args_log")" "--no-session-persistence"
+resume_job="$(ls "$persist_work/.cc-watch" | grep '^cc-' | sort | tail -1)"
+resume_dir="$persist_work/.cc-watch/$resume_job"
+assert_contains "$(cat "$resume_dir/metadata.json")" "\"resumed_from\": \"$persist_job\""
+assert_contains "$(cat "$resume_dir/result.txt")" "- resumed_from: \`$persist_job\`"
+assert_contains "$(cat "$resume_dir/metadata.json")" '"title": "resumable thread"'
+
+resume_title_args_log="$TMP_ROOT/resumable-title-resume.args"
+FAKE_ARGS_LOG="$resume_title_args_log" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
+  "resumable thread" -- "continue by title" > "$TMP_ROOT/resumable-title-resume.out"
+assert_contains "$(tail -1 "$resume_title_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
+
+resume_raw_args_log="$TMP_ROOT/resumable-raw-resume.args"
+FAKE_ARGS_LOG="$resume_raw_args_log" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
+  22222222-2222-2222-2222-222222222222 -- "continue by raw session" > "$TMP_ROOT/resumable-raw-resume.out"
+assert_contains "$(tail -1 "$resume_raw_args_log")" "--resume 22222222-2222-2222-2222-222222222222"
+
+non_persist_work="$(new_workdir nonpersist-resume)"
+non_persist_args="$TMP_ROOT/nonpersist.args"
+FAKE_ARGS_LOG="$non_persist_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$non_persist_work" --claude "$FAKE_CLAUDE" \
+  --title "not resumable" -- "first review" > "$TMP_ROOT/nonpersist-first.out"
+non_persist_job="$(job_id_for_work "$non_persist_work")"
+set +e
+FAKE_ARGS_LOG="$TMP_ROOT/nonpersist-resume.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$non_persist_work" --claude "$FAKE_CLAUDE" \
+  "$non_persist_job" -- "should not spawn" > "$TMP_ROOT/nonpersist-resume.out" 2>&1
+non_persist_resume_code="$?"
+set -e
+if [ "$non_persist_resume_code" -eq 0 ]; then
+  fail "resume from default non-persistent job should fail"
+fi
+assert_contains "$(cat "$TMP_ROOT/nonpersist-resume.out")" "--persist-session"
+if [ -f "$TMP_ROOT/nonpersist-resume.args" ]; then
+  fail "non-persistent resume spawned Claude"
+fi
 
 cancel_work="$(new_workdir async-cancel)"
 cancel_args="$TMP_ROOT/async-cancel.args"

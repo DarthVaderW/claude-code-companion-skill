@@ -21,7 +21,7 @@ global Python/Node locations.
 Run directly from this checkout:
 
 ```bash
-claude-code-companion/scripts/cc-watch run --cwd . -- "Review the current changes."
+claude-code-companion/scripts/cc-watch run --cwd . --title release-review -- "Review the current changes."
 ```
 
 For long prompts, store the prompt in a Markdown file and pass it explicitly:
@@ -42,7 +42,7 @@ claude-code-companion/scripts/cc-watch doctor --cwd .
 For longer tasks:
 
 ```bash
-job_id="$(claude-code-companion/scripts/cc-watch start --cwd . -- "Investigate this repo.")"
+job_id="$(claude-code-companion/scripts/cc-watch start --cwd . --title repo-review -- "Investigate this repo.")"
 claude-code-companion/scripts/cc-watch status "$job_id"
 claude-code-companion/scripts/cc-watch result "$job_id"
 ```
@@ -58,6 +58,13 @@ disable the timeout.
 pass `--strict-exit` when they need non-zero exits for `running-*`.
 `result` prints `result.txt` for any terminal job and exits non-zero for
 failed, timed-out, or canceled jobs.
+Use `list` and `show` to find and read archived jobs without copying job ids:
+
+```bash
+claude-code-companion/scripts/cc-watch list --cwd .
+claude-code-companion/scripts/cc-watch show --cwd . --last
+claude-code-companion/scripts/cc-watch show --cwd . repo-review --transcript
+```
 
 Runtime state for async jobs is written only under the target working directory:
 
@@ -71,6 +78,7 @@ Each job directory keeps both human-readable and raw evidence:
 .cc-watch/<job-id>/
   prompt.md          Prompt sent to Claude
   result.txt         Human-readable result archive for every terminal state
+  transcript.md      Prompt plus Claude result for future reading
   metadata.json      Machine-readable job metadata
   metadata.md        Human-readable job metadata
   stdout.jsonl       Raw Claude stream-json
@@ -81,7 +89,8 @@ Each job directory keeps both human-readable and raw evidence:
 final answer. On `failed`, `timed-out`, or `canceled`, it contains a status
 header plus `NO FINAL RESULT`, the reason, stderr tail, and raw stream tail when
 available. Treat `stdout.jsonl` as the lossless source of truth and
-`result.txt` as the convenient human entry point.
+`result.txt` as the convenient human entry point. Use `transcript.md` when a
+future Codex thread or CLI user needs to read the prompt and answer together.
 
 You can remove that directory at any time after jobs finish.
 
@@ -112,15 +121,22 @@ having Codex pass the relevant diff or file excerpts in the prompt.
 
 `cc-watch` passes `--no-session-persistence` to Claude Code by default. Use
 `--persist-session` only when you explicitly want Claude Code to save a
-print-mode session for later resume.
+print-mode session for later resume. Default jobs still record a `session_id`
+when Claude emits one, but they are not resumable.
 
 Resume modes are explicit:
 
 ```bash
-claude-code-companion/scripts/cc-watch run --persist-session --cwd . -- "Start a reusable Claude thread."
-claude-code-companion/scripts/cc-watch run --resume <session-id> --cwd . -- "Continue that thread."
+claude-code-companion/scripts/cc-watch run --persist-session --cwd . --title repo-review -- "Start a reusable Claude thread."
+claude-code-companion/scripts/cc-watch resume --cwd . repo-review -- "Continue that thread."
+claude-code-companion/scripts/cc-watch resume --cwd . <job-id> -- "Continue by job id."
+claude-code-companion/scripts/cc-watch resume --cwd . <session-id> -- "Continue by raw Claude session id."
 claude-code-companion/scripts/cc-watch run --continue --cwd . -- "Continue Claude's latest cwd thread."
 ```
+
+`resume` resolves selectors in this order: exact job id, exact title with the
+most recent matching job, then raw session id. When resuming from a job or title
+it refuses jobs that were not started with `--persist-session`.
 
 ## Install As A Codex Skill
 
