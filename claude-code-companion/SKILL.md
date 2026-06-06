@@ -31,6 +31,9 @@ Do not call Claude for tiny tasks where Codex can answer directly.
 - Default to highest effort unless the user asks for a faster pass.
 - Treat Claude as read-only by default. The helper allows only local read tools
   by default and disables MCP config unless `--allow-mcp` is explicit.
+- Prefer explicit MCP tool allowlists over broad MCP access. Use repeatable
+  `--mcp-tool TOOL` for known read-only SiYuan/Zotero tools; it implies MCP
+  config loading but keeps `--tools` narrow.
 - Prefer passing diffs, file lists, or command output in the prompt. Use
   `--allow-bash` only when Claude genuinely needs shell access.
 - For long prompts, write a Markdown prompt file and pass `--prompt-file`.
@@ -40,6 +43,9 @@ Do not call Claude for tiny tasks where Codex can answer directly.
   reviews. Pass `--persist-session` when a new Claude session should be
   resumable, `--resume <session-id>` to continue a known session, or
   `--continue` only when continuing Claude's latest cwd session is intended.
+- For a long task or `/goals` run, start one persisted Claude thread with a
+  stable title, then prefer `cc-watch resume <title>` for subsequent plan,
+  research, MCP-reading, and diff-review prompts so Claude keeps context.
 - Do not let Claude and Codex edit the same files at the same time unless the
   user explicitly asks for a handoff.
 - Do not expose secrets. Never ask Claude to print env values. If env checking
@@ -114,7 +120,16 @@ When running inside Codex tool calls, prefer foreground `run` unless the shell
 will remain alive; some command runners clean background children when the tool
 call exits. Use `status` while waiting. `running-quiet` means Claude is still
 alive but has not emitted stream-json recently; do not treat it as failure. Use
-`--max-runtime SEC` to bound long Opus jobs when needed.
+`--max-runtime SEC` to bound long Opus jobs when needed. Use
+`--heartbeat SEC` for long foreground calls when Codex should see compact
+progress without reading raw `stream-json`.
+
+For a persistent long-task reviewer:
+
+```bash
+scripts/cc-watch run --persist-session --cwd . --title goal-review --heartbeat 60 -- "Start the review thread..."
+scripts/cc-watch resume --cwd . goal-review --heartbeat 60 -- "Continue with the latest diff..."
+```
 
 Every terminal job writes `.cc-watch/<job-id>/result.txt`, `transcript.md`,
 `metadata.json`, `metadata.md`, `prompt.md`, `stdout.jsonl`, and `stderr.log`.
@@ -155,27 +170,53 @@ scripts/cc-watch prune --cwd . --keep 10 --yes
 `prune` never removes running jobs, and `prune --yes` requires an explicit
 selector such as `--keep`, `--older-than-days`, or `--all-terminal`.
 
+## MCP Reading
+
+Claude can read from SiYuan or Zotero only when the local Claude Code
+installation already has those MCP servers configured and the helper is given
+explicit tools. Do not use prompt text as the permission boundary.
+
+Prefer this shape:
+
+```bash
+scripts/cc-watch run --persist-session --cwd . --title paper-review \
+  --mcp-tool mcp__siyuan__siyuan_ping \
+  --mcp-tool mcp__zotero__zotero_ping \
+  -- "Verify read-only MCP visibility, then report what tools are available."
+```
+
+Then resume the same title with the specific read-only search/get tools needed
+for the task. Tool names are installation-dependent; use the exact Claude Code
+MCP tool names. Start with ping/list/search/get style tools. Do not allow
+write/delete/move tools unless the user explicitly approves the side effect.
+Use broad `--allow-mcp` only for a deliberate diagnostic where the prompt and
+environment are already safe.
+
 ## Strict Review Hooks
 
 Use this stricter loop when the user asks for rigorous work, when a task is
 large or risky, or when working in a long-running `/goals` style task where the
 user may be away:
 
-1. Before editing, ask Claude for a read-only plan review. Include the intended
+1. Pick a stable title for the task, such as `goal-cc-watch-heartbeat`. If a
+   matching persisted job already exists, resume it by title instead of
+   starting a fresh Claude context.
+2. Before editing, ask Claude for a read-only plan review. Include the intended
    changes, constraints, risks, and tests. Codex should inspect Claude's
    findings before making edits.
-2. After editing and running local checks, ask Claude for a read-only diff
-   review. Include `git diff --stat`, relevant test output, and the key diff or
-   file list. Codex should address concrete findings or explain why they are
-   deferred before finalizing.
-3. Keep Claude read-only by default. Do not pass `--read-write`, `--allow-mcp`,
-   or `--allow-bash` unless the user explicitly approves the added capability.
+3. After editing and running local checks, resume the same Claude thread for a
+   read-only diff review. Include `git diff --stat`, relevant test output, and
+   the key diff or file list. Codex should address concrete findings or explain
+   why they are deferred before finalizing.
+4. Keep Claude read-only by default. Do not pass `--read-write`, broad
+   `--allow-mcp`, or `--allow-bash` unless the user explicitly approves the
+   added capability. For MCP, prefer explicit `--mcp-tool` entries.
 
 Suggested titles:
 
 ```bash
-scripts/cc-watch run --cwd . --title strict-plan-review -- "Review this implementation plan..."
-scripts/cc-watch run --cwd . --title strict-diff-review -- "Review this completed diff..."
+scripts/cc-watch run --persist-session --cwd . --title strict-review -- "Review this implementation plan..."
+scripts/cc-watch resume --cwd . strict-review -- "Review this completed diff..."
 ```
 
 ## Prompt Shape

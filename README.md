@@ -54,7 +54,13 @@ when a tool call exits, so `start/status/result` is best for a normal terminal,
 a persistent shell, or a single shell script that starts and waits in one go.
 `status` includes `elapsed=<seconds>`, and jobs time out after 1800 seconds by
 default. Override that with `--max-runtime SEC`, or use `--max-runtime 0` to
-disable the timeout.
+disable the timeout. For foreground `run`/`resume`, add `--heartbeat SEC` to
+print compact progress lines while Claude is still working:
+
+```bash
+claude-code-companion/scripts/cc-watch run --cwd . --heartbeat 60 --max-runtime 900 -- "Long Opus review."
+```
+
 `status` returns zero for running jobs by default. Existing polling loops should
 pass `--strict-exit` when they need non-zero exits for `running-*`.
 `result` prints `result.txt` for any terminal job and exits non-zero for
@@ -147,17 +153,29 @@ Use explicit opt-ins only when needed:
 
 ```bash
 claude-code-companion/scripts/cc-watch run --allow-bash --cwd . -- "Inspect git diff read-only."
-claude-code-companion/scripts/cc-watch run --allow-mcp --cwd . -- "Use configured MCP read-only."
+claude-code-companion/scripts/cc-watch run --mcp-tool mcp__siyuan__siyuan_ping --cwd . -- "Use one configured MCP tool."
 claude-code-companion/scripts/cc-watch run --read-write --cwd . -- "Take over edits."
 ```
 
 Do not use `--read-write` for ordinary Codex/Claude collaboration. Prefer
 having Codex pass the relevant diff or file excerpts in the prompt.
+Use broad `--allow-mcp` only for deliberate diagnostics. For ordinary
+SiYuan/Zotero reads, pass one or more exact read-only MCP tool names with
+`--mcp-tool TOOL`; this loads Claude Code's MCP config but keeps `--tools`
+narrow. Tool names are installation-dependent, for example
+`mcp__siyuan__siyuan_ping` or `mcp__zotero__zotero_ping`.
 
 For rigorous projects or long-running `/goals` style work, use a strict review
 loop: ask Claude for a read-only plan review before editing, then ask Claude for
 a read-only diff review after edits and local checks. Codex remains responsible
 for deciding which findings to implement.
+Use one stable persisted title for the whole task and resume it for later
+reviews so Claude keeps context:
+
+```bash
+claude-code-companion/scripts/cc-watch run --persist-session --cwd . --title goal-review --heartbeat 60 -- "Start the long-task review."
+claude-code-companion/scripts/cc-watch resume --cwd . goal-review --heartbeat 60 -- "Continue with the latest diff."
+```
 
 `cc-watch` passes `--no-session-persistence` to Claude Code by default. Use
 `--persist-session` only when you explicitly want Claude Code to save a
@@ -177,6 +195,20 @@ claude-code-companion/scripts/cc-watch run --continue --cwd . -- "Continue Claud
 `resume` resolves selectors in this order: exact job id, exact title with the
 most recent matching job, then raw session id. When resuming from a job or title
 it refuses jobs that were not started with `--persist-session`.
+
+For MCP-backed research, start with a persisted thread and explicit read-only
+tools:
+
+```bash
+claude-code-companion/scripts/cc-watch run --persist-session --cwd . --title paper-review \
+  --mcp-tool mcp__siyuan__siyuan_ping \
+  --mcp-tool mcp__zotero__zotero_ping \
+  -- "Verify MCP visibility and summarize the available read-only path."
+```
+
+Then resume the same title with the specific SiYuan/Zotero read tools needed for
+the paper or project task. Do not allow MCP write/delete/move tools unless the
+user explicitly approves that side effect.
 
 ## Install As A Codex Skill
 

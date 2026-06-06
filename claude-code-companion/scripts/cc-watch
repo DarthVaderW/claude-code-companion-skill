@@ -40,8 +40,12 @@ Options:
   --prompt-file FILE    Read the prompt from a Markdown file instead of args/stdin.
   --quiet-after SEC     Seconds without stream events before running-quiet.
   --max-runtime SEC     Maximum job runtime before timeout. Default: 1800.
+  --heartbeat SEC       For foreground run/resume, print compact progress every
+                        SEC seconds. 0 disables it. Default: 0.
   --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
   --allow-mcp           Load Claude Code MCP config instead of strict empty MCP.
+  --mcp-tool TOOL       Load MCP config and add one explicit MCP tool to the
+                        read-only tool allowlist. Repeatable.
   --read-write          Allow Claude Code's default write-capable tools.
   --persist-session     Allow Claude Code to persist this print-mode session.
   --resume SESSION_ID   Resume a persisted Claude Code session.
@@ -176,6 +180,22 @@ json_string() {
   '
 }
 
+json_string_array_file() {
+  local path="$1"
+  if [ ! -f "$path" ]; then
+    printf '[]'
+    return 0
+  fi
+  perl -MJSON::PP -CS -e '
+    my @values;
+    while (my $line = <STDIN>) {
+      chomp $line;
+      push @values, $line if length $line;
+    }
+    print JSON::PP->new->ascii(0)->encode(\@values);
+  ' < "$path"
+}
+
 is_pid_alive() {
   local pid="$1"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
@@ -201,6 +221,22 @@ validate_title() {
   esac
   if printf '%s' "$title" | LC_ALL=C grep -q '[[:cntrl:]]'; then
     die "--title cannot contain control characters"
+  fi
+}
+
+validate_tool_name() {
+  local tool="$1"
+  [ -n "$tool" ] || die "--mcp-tool requires a non-empty value"
+  case "$tool" in
+    *,*) die "--mcp-tool cannot contain commas" ;;
+    *'
+'*) die "--mcp-tool cannot contain newlines" ;;
+  esac
+  if printf '%s' "$tool" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "--mcp-tool cannot contain control characters"
+  fi
+  if printf '%s' "$tool" | LC_ALL=C grep -q '[^A-Za-z0-9_.:-]'; then
+    die "--mcp-tool may only contain letters, numbers, _, ., :, or -"
   fi
 }
 
@@ -296,8 +332,11 @@ parse_run_options() {
   CLAUDE="${CLAUDE_BIN:-claude}"
   QUIET_AFTER="$QUIET_AFTER_DEFAULT"
   MAX_RUNTIME="$MAX_RUNTIME_DEFAULT"
+  HEARTBEAT=0
   ALLOW_BASH=0
   ALLOW_MCP=0
+  MCP_TOOLS=()
+  MCP_TOOL_COUNT=0
   READ_WRITE=0
   NO_SESSION_PERSISTENCE=1
   RESUME_SESSION=""
@@ -360,6 +399,12 @@ parse_run_options() {
         validate_nonnegative_int "--max-runtime" "$MAX_RUNTIME"
         shift 2
         ;;
+      --heartbeat)
+        [ "$#" -ge 2 ] || die "--heartbeat requires a value"
+        HEARTBEAT="$2"
+        validate_nonnegative_int "--heartbeat" "$HEARTBEAT"
+        shift 2
+        ;;
       --allow-bash)
         ALLOW_BASH=1
         shift
@@ -367,6 +412,14 @@ parse_run_options() {
       --allow-mcp)
         ALLOW_MCP=1
         shift
+        ;;
+      --mcp-tool)
+        [ "$#" -ge 2 ] || die "--mcp-tool requires a value"
+        validate_tool_name "$2"
+        MCP_TOOLS+=("$2")
+        MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
+        ALLOW_MCP=1
+        shift 2
         ;;
       --read-write)
         READ_WRITE=1
@@ -410,6 +463,9 @@ parse_run_options() {
   fi
   if [ -n "$PROMPT_FILE" ] && [ ! -f "$PROMPT_FILE" ]; then
     die "prompt file not found: $PROMPT_FILE"
+  fi
+  if [ "$READ_WRITE" = "1" ] && [ "$MCP_TOOL_COUNT" -gt 0 ]; then
+    die "--mcp-tool cannot be combined with --read-write; use --allow-mcp --read-write intentionally"
   fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
@@ -516,8 +572,16 @@ write_config() {
   write_file "$JOB_DIR/model" "$MODEL"
   write_file "$JOB_DIR/quiet_after" "$QUIET_AFTER"
   write_file "$JOB_DIR/max_runtime" "$MAX_RUNTIME"
+  write_file "$JOB_DIR/heartbeat" "$HEARTBEAT"
   write_file "$JOB_DIR/allow_bash" "$ALLOW_BASH"
   write_file "$JOB_DIR/allow_mcp" "$ALLOW_MCP"
+  : > "$JOB_DIR/mcp_tools"
+  local tool
+  if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
+    for tool in "${MCP_TOOLS[@]}"; do
+      printf '%s\n' "$tool" >> "$JOB_DIR/mcp_tools"
+    done
+  fi
   write_file "$JOB_DIR/read_write" "$READ_WRITE"
   write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
   write_file "$JOB_DIR/resume_session" "$RESUME_SESSION"
@@ -550,8 +614,20 @@ load_config() {
   QUIET_AFTER="$(read_file "$JOB_DIR/quiet_after")"
   MAX_RUNTIME="$(read_file "$JOB_DIR/max_runtime")"
   [ -n "$MAX_RUNTIME" ] || MAX_RUNTIME="$MAX_RUNTIME_DEFAULT"
+  HEARTBEAT="$(read_file "$JOB_DIR/heartbeat")"
+  [ -n "$HEARTBEAT" ] || HEARTBEAT=0
   ALLOW_BASH="$(read_file "$JOB_DIR/allow_bash")"
   ALLOW_MCP="$(read_file "$JOB_DIR/allow_mcp")"
+  MCP_TOOLS=()
+  MCP_TOOL_COUNT=0
+  if [ -f "$JOB_DIR/mcp_tools" ]; then
+    local tool
+    while IFS= read -r tool; do
+      [ -n "$tool" ] || continue
+      MCP_TOOLS+=("$tool")
+      MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
+    done < "$JOB_DIR/mcp_tools"
+  fi
   READ_WRITE="$(read_file "$JOB_DIR/read_write")"
   [ -n "$ALLOW_BASH" ] || ALLOW_BASH=0
   [ -n "$ALLOW_MCP" ] || ALLOW_MCP=0
@@ -815,11 +891,13 @@ write_metadata_files() {
     printf '  "started_at": %s,\n' "${started_at:-0}"
     printf '  "finished_at": %s,\n' "${finished_at:-0}"
     printf '  "elapsed_seconds": %s,\n' "$elapsed"
+    printf '  "heartbeat": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/heartbeat")" | json_string)"
     printf '  "session_id": %s,\n' "$(printf '%s' "$session" | json_string)"
     printf '  "session_resumable": %s,\n' "$(printf '%s' "$session_resumable" | json_string)"
     printf '  "resumed_from": %s,\n' "$(printf '%s' "$resumed_from" | json_string)"
     printf '  "allow_bash": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_bash")" | json_string)"
     printf '  "allow_mcp": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_mcp")" | json_string)"
+    printf '  "mcp_tools": %s,\n' "$(json_string_array_file "$JOB_DIR/mcp_tools")"
     printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
     printf '  "prompt_file": %s\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
     printf '}\n'
@@ -842,6 +920,10 @@ write_metadata_files() {
     [ -n "$target_repo" ] && printf '%s\n' "- target_repo: \`$target_repo\`"
     printf '%s\n' "- model: \`$(read_file "$JOB_DIR/model")\`"
     printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
+    printf '%s\n' "- heartbeat: \`$(read_file "$JOB_DIR/heartbeat")\`"
+    if [ -s "$JOB_DIR/mcp_tools" ]; then
+      printf '%s\n' "- mcp_tools: \`$(paste -sd, "$JOB_DIR/mcp_tools")\`"
+    fi
     if [ -n "$session" ]; then
       printf '%s\n' "- session_id: \`$session\`"
       printf '%s\n' "- session_resumable: \`$session_resumable\`"
@@ -947,8 +1029,14 @@ build_claude_args() {
   fi
   if [ "$READ_WRITE" != "1" ]; then
     local allowed_tools="$ALLOWED_READONLY_TOOLS"
+    local tool
     if [ "$ALLOW_BASH" = "1" ]; then
       allowed_tools="$allowed_tools,Bash"
+    fi
+    if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
+      for tool in "${MCP_TOOLS[@]}"; do
+        allowed_tools="$allowed_tools,$tool"
+      done
     fi
     CLAUDE_ARGS+=(--tools "$allowed_tools")
   fi
@@ -1038,6 +1126,41 @@ stop_timeout_watchdog() {
     wait "$WATCHDOG_PID" 2>/dev/null || true
   fi
   rm -f "$JOB_DIR/watchdog_pid"
+}
+
+start_foreground_heartbeat() {
+  HEARTBEAT_PID=""
+  if [ "${HEARTBEAT:-0}" -le 0 ]; then
+    return 0
+  fi
+
+  # Foreground-only heartbeat: the parent process owns and reaps this helper.
+  (
+    while :; do
+      sleep "$HEARTBEAT"
+      local status elapsed last_event
+      status="$(read_file "$JOB_DIR/status")"
+      case "$status" in
+        finished|failed|canceled|timed-out)
+          exit 0
+          ;;
+      esac
+      elapsed="$(job_elapsed_seconds)"
+      last_event="$(read_file "$JOB_DIR/last_event_at")"
+      [ -n "$status" ] || status=unknown
+      [ -n "$last_event" ] || last_event=0
+      printf '[cc] heartbeat job=%s status=%s elapsed=%s last_event_at=%s\n' \
+        "$JOB_ID" "$status" "$elapsed" "$last_event" >&2
+    done
+  ) &
+  HEARTBEAT_PID="$!"
+}
+
+stop_foreground_heartbeat() {
+  if [ -n "${HEARTBEAT_PID:-}" ] && is_pid_alive "$HEARTBEAT_PID"; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+  fi
 }
 
 worker() {
@@ -1510,8 +1633,11 @@ parse_resume_options() {
   CLAUDE="${CLAUDE_BIN:-claude}"
   QUIET_AFTER="$QUIET_AFTER_DEFAULT"
   MAX_RUNTIME="$MAX_RUNTIME_DEFAULT"
+  HEARTBEAT=0
   ALLOW_BASH=0
   ALLOW_MCP=0
+  MCP_TOOLS=()
+  MCP_TOOL_COUNT=0
   READ_WRITE=0
   NO_SESSION_PERSISTENCE=0
   RESUME_SESSION=""
@@ -1575,6 +1701,12 @@ parse_resume_options() {
         validate_nonnegative_int "--max-runtime" "$MAX_RUNTIME"
         shift 2
         ;;
+      --heartbeat)
+        [ "$#" -ge 2 ] || die "--heartbeat requires a value"
+        HEARTBEAT="$2"
+        validate_nonnegative_int "--heartbeat" "$HEARTBEAT"
+        shift 2
+        ;;
       --allow-bash)
         ALLOW_BASH=1
         shift
@@ -1582,6 +1714,14 @@ parse_resume_options() {
       --allow-mcp)
         ALLOW_MCP=1
         shift
+        ;;
+      --mcp-tool)
+        [ "$#" -ge 2 ] || die "--mcp-tool requires a value"
+        validate_tool_name "$2"
+        MCP_TOOLS+=("$2")
+        MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
+        ALLOW_MCP=1
+        shift 2
         ;;
       --read-write)
         READ_WRITE=1
@@ -1617,6 +1757,9 @@ parse_resume_options() {
   fi
   if [ -z "$PROMPT_FILE" ] && [ "${#PROMPT_ARGS[@]}" -eq 0 ]; then
     die "resume requires a prompt after -- or --prompt-file"
+  fi
+  if [ "$READ_WRITE" = "1" ] && [ "$MCP_TOOL_COUNT" -gt 0 ]; then
+    die "--mcp-tool cannot be combined with --read-write; use --allow-mcp --read-write intentionally"
   fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
@@ -1656,8 +1799,11 @@ run_foreground_job() {
   write_file "$JOB_DIR/worker_pid" "$$"
 
   printf '[cc] job=%s status=starting\n' "$JOB_ID"
+  local HEARTBEAT_PID=""
+  start_foreground_heartbeat
   worker "$JOB_DIR"
   local code="$?"
+  stop_foreground_heartbeat
   render_status >/dev/null || true
 
   if [ "$code" -eq 0 ]; then
@@ -1698,6 +1844,9 @@ cmd_resume() {
 
 cmd_start() {
   parse_run_options "$@"
+  if [ "$HEARTBEAT" -gt 0 ]; then
+    die "--heartbeat is only supported by foreground run/resume"
+  fi
   JOB_ID="$(new_job_id)"
   JOB_DIR="$(job_dir_for "$STATE_ROOT" "$JOB_ID")"
   write_config

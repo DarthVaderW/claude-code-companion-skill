@@ -216,6 +216,25 @@ allow_mcp_args="$(run_success allow-mcp --allow-mcp)"
 assert_contains "$allow_mcp_args" "--tools Read,Grep,Glob,LS"
 assert_not_contains "$allow_mcp_args" "--strict-mcp-config"
 
+mcp_tool_args="$(run_success mcp-tool --mcp-tool mcp__siyuan__siyuan_ping --mcp-tool mcp__zotero__zotero_ping)"
+assert_contains "$mcp_tool_args" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping"
+assert_not_contains "$mcp_tool_args" "--strict-mcp-config"
+mcp_tool_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-tool")"
+assert_contains "$(cat "$mcp_tool_dir/metadata.json")" '"mcp_tools": ["mcp__siyuan__siyuan_ping","mcp__zotero__zotero_ping"]'
+assert_contains "$(cat "$mcp_tool_dir/metadata.md")" "- mcp_tools: \`mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping\`"
+
+if FAKE_ARGS_LOG="$TMP_ROOT/bad-mcp-tool.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$(new_workdir bad-mcp-tool)" --claude "$FAKE_CLAUDE" \
+  --mcp-tool "bad,tool" -- "review only" >/dev/null 2>&1; then
+  fail "mcp tool with comma should fail"
+fi
+
+if FAKE_ARGS_LOG="$TMP_ROOT/mcp-tool-read-write.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$(new_workdir mcp-tool-read-write)" --claude "$FAKE_CLAUDE" \
+  --mcp-tool mcp__siyuan__siyuan_ping --read-write -- "review only" >/dev/null 2>&1; then
+  fail "--mcp-tool with --read-write should fail"
+fi
+
 read_write_args="$(run_success read-write --read-write)"
 assert_not_contains "$read_write_args" "--tools"
 assert_contains "$read_write_args" "--strict-mcp-config"
@@ -362,6 +381,29 @@ fi
 assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "NO FINAL RESULT"
 assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "max runtime"
 assert_json_file "$(job_dir_for_work "$timeout_work")/metadata.json"
+
+heartbeat_work="$(new_workdir heartbeat)"
+heartbeat_args="$TMP_ROOT/heartbeat.args"
+heartbeat_output="$TMP_ROOT/heartbeat.out"
+set +e
+FAKE_ARGS_LOG="$heartbeat_args" FAKE_BEHAVIOR=slow \
+  "$CC_WATCH" run --cwd "$heartbeat_work" --claude "$FAKE_CLAUDE" \
+  --max-runtime 2 --heartbeat 1 -- "review only" > "$heartbeat_output" 2>&1
+heartbeat_code="$?"
+set -e
+if [ "$heartbeat_code" -eq 0 ]; then
+  fail "heartbeat slow run should time out"
+fi
+assert_contains "$(cat "$heartbeat_output")" "[cc] heartbeat job="
+assert_contains "$(cat "$heartbeat_output")" "elapsed="
+assert_contains "$(cat "$heartbeat_output")" "status=timed-out"
+assert_contains "$(cat "$(job_dir_for_work "$heartbeat_work")/metadata.json")" '"heartbeat": "1"'
+
+if FAKE_ARGS_LOG="$TMP_ROOT/start-heartbeat.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" start --cwd "$(new_workdir start-heartbeat)" --claude "$FAKE_CLAUDE" \
+  --heartbeat 1 -- "review only" >/dev/null 2>&1; then
+  fail "start --heartbeat should fail because heartbeat is foreground-only"
+fi
 
 fail_work="$(new_workdir fail)"
 fail_args="$TMP_ROOT/fail.args"
@@ -636,6 +678,14 @@ FAKE_ARGS_LOG="$resume_title_args_log" FAKE_BEHAVIOR=success \
   "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
   "resumable thread" -- "continue by title" > "$TMP_ROOT/resumable-title-resume.out"
 assert_contains "$(tail -1 "$resume_title_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
+
+resume_mcp_args_log="$TMP_ROOT/resumable-mcp-resume.args"
+FAKE_ARGS_LOG="$resume_mcp_args_log" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
+  --mcp-tool mcp__siyuan__siyuan_ping "resumable thread" -- "continue with mcp" > "$TMP_ROOT/resumable-mcp-resume.out"
+assert_contains "$(tail -1 "$resume_mcp_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
+assert_contains "$(tail -1 "$resume_mcp_args_log")" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping"
+assert_not_contains "$(tail -1 "$resume_mcp_args_log")" "--strict-mcp-config"
 
 resume_raw_args_log="$TMP_ROOT/resumable-raw-resume.args"
 FAKE_ARGS_LOG="$resume_raw_args_log" FAKE_BEHAVIOR=success \

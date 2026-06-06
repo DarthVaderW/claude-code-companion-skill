@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add foreground `cc-watch --heartbeat SEC` progress lines for long `run` and
+  `resume` calls.
+- Add repeatable `--mcp-tool TOOL` so Claude Code can use explicitly allowed
+  read-only MCP tools without broad MCP access.
+- Document long-task persistent Claude threads: start with `--persist-session`
+  and resume by stable title for later plan, MCP-reading, and diff reviews.
 - Add `cc-watch archive` and `cc-watch prune` with dry-run defaults, terminal-job
   filtering, and explicit `--yes` for destructive cleanup.
 - Document strict plan-review and diff-review hooks for rigorous projects and

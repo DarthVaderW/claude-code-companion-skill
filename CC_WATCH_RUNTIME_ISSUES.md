@@ -24,6 +24,11 @@ Resolved after `v0.3.0`:
   explicit `--yes` for actual cleanup.
 - Strict plan-review and diff-review hooks are documented for rigorous projects
   and long-running `/goals` style workflows.
+- Foreground `cc-watch run` and `resume` now support `--heartbeat SEC` so Codex
+  can see compact progress during long Claude calls without reading raw
+  `stream-json`.
+- `cc-watch` now supports repeatable `--mcp-tool TOOL`, which loads configured
+  MCP servers while keeping Claude's `--tools` list narrowed to explicit tools.
 
 Resolved in `v0.3.0`:
 
@@ -45,18 +50,17 @@ Resolved in `v0.3.0`:
 
 1. Add more `doctor` guidance for custom state roots if real-world usage shows
    confusing archive locations.
-2. Consider an optional heartbeat for long foreground `run` jobs so Codex can
-   distinguish slow progress from silence.
-3. Add a cleanup path for stale `running-*` jobs whose worker process has
+2. Add a cleanup path for stale `running-*` jobs whose worker process has
    already died; current prune/archive intentionally skip raw non-terminal
    status files.
-4. Document the release and install/update path for GitHub-tagged skill
+3. Document the release and install/update path for GitHub-tagged skill
    installs separately from local symlink development installs.
-5. Keep mutating Claude plugin operations out of `cc-watch`. If a future
+4. Keep mutating Claude plugin operations out of `cc-watch`. If a future
    `cc-plugin update` is added, it must require explicit plugin names, `--yes`,
    and a clear warning that it writes global `~/.claude` plugin state.
-6. Defer MCP smoke checks until there is an explicit read-only MCP allowlist and
-   a proven need. Prompt text alone is not a write guard.
+5. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
+   tool names are stable across the user's Claude Code installs. Prompt text
+   alone is not a write guard.
 
 ## Origin
 
