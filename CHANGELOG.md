@@ -4,6 +4,8 @@
 
 - Add `cc-watch list --json` for machine-readable, newest-first job indexes
   with status, session, timing, and archive path fields.
+- Add `cc-watch findings` / `findings --json` to extract review-oriented
+  Markdown sections from archived Claude results.
 
 ## v0.5.1 - 2026-06-07
 

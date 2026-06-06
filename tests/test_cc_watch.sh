@@ -47,6 +47,14 @@ case "${FAKE_BEHAVIOR:-success}" in
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
     printf '%s' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
     ;;
+  findings)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"Intro paragraph.\n\n## Findings\n\n### P1: Bug\nActionable finding body.\n\n```md\n## Not a real heading\n```\n\n### P2: Risk\nRisk body with sk-ant-secretvalue.\n\n## Appendix\nThis should not be in findings output."}'
+    ;;
+  findings-summary)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"## Summary\nShort verdict.\n\n## Analysis\nSubstantive analysis body.\n\n## Appendix\nIgnored appendix."}'
+    ;;
   fail)
     printf 'fake failure\n' >&2
     exit 42
@@ -379,6 +387,23 @@ assert_contains "$(cat "$(job_dir_for_work "$no_result_work")/metadata.json")" '
 assert_json_file "$(job_dir_for_work "$no_result_work")/metadata.json"
 no_result_status="$("$CC_WATCH" status "$no_result_job" --cwd "$no_result_work" || true)"
 assert_contains "$no_result_status" "exit_code=1"
+set +e
+"$CC_WATCH" findings "$no_result_job" --cwd "$no_result_work" > "$TMP_ROOT/no-result-findings.out" 2>&1
+no_result_findings_code="$?"
+set -e
+if [ "$no_result_findings_code" -ne 1 ]; then
+  fail "no-result findings should return 1, got $no_result_findings_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/no-result-findings.out")" "NO FINAL RESULT"
+set +e
+"$CC_WATCH" findings "$no_result_job" --cwd "$no_result_work" --json > "$TMP_ROOT/no-result-findings.json" 2>&1
+no_result_findings_json_code="$?"
+set -e
+if [ "$no_result_findings_json_code" -ne 1 ]; then
+  fail "no-result findings --json should return 1, got $no_result_findings_json_code"
+fi
+assert_json_file "$TMP_ROOT/no-result-findings.json"
+assert_contains "$(cat "$TMP_ROOT/no-result-findings.json")" '"status" : "failed"'
 
 error_result_work="$(new_workdir error-result)"
 error_result_args="$TMP_ROOT/error-result.args"
@@ -627,6 +652,39 @@ async_status="$(wait_for_status "$async_work" "$async_job" "finished")"
 assert_contains "$async_status" "elapsed="
 async_result="$("$CC_WATCH" result "$async_job" --cwd "$async_work")"
 assert_contains "$async_result" "fake final review"
+async_findings="$("$CC_WATCH" findings "$async_job" --cwd "$async_work")"
+assert_contains "$async_findings" "fake final review"
+
+findings_work="$(new_workdir findings)"
+findings_args="$TMP_ROOT/findings.args"
+findings_title="findings sk-ant-secretvalue"
+FAKE_ARGS_LOG="$findings_args" FAKE_BEHAVIOR=findings \
+  "$CC_WATCH" run --cwd "$findings_work" --claude "$FAKE_CLAUDE" \
+  --title "$findings_title" -- "review only" > "$TMP_ROOT/findings.out"
+findings_text="$("$CC_WATCH" findings --cwd "$findings_work" "$findings_title")"
+assert_contains "$findings_text" "## Findings"
+assert_contains "$findings_text" "### P1: Bug"
+assert_contains "$findings_text" "## Not a real heading"
+assert_contains "$findings_text" "sk-ant-REDACTED"
+assert_not_contains "$findings_text" "sk-ant-secretvalue"
+assert_not_contains "$findings_text" "## Appendix"
+findings_json_file="$TMP_ROOT/findings.json"
+"$CC_WATCH" findings --cwd "$findings_work" --last --json > "$findings_json_file"
+assert_json_file "$findings_json_file"
+findings_json_text="$(cat "$findings_json_file")"
+assert_contains "$findings_json_text" '"heading" : "Findings"'
+assert_contains "$findings_json_text" '"title" : "findings sk-ant-REDACTED"'
+assert_not_contains "$findings_json_text" "sk-ant-secretvalue"
+
+findings_summary_work="$(new_workdir findings-summary)"
+FAKE_ARGS_LOG="$TMP_ROOT/findings-summary.args" FAKE_BEHAVIOR=findings-summary \
+  "$CC_WATCH" run --cwd "$findings_summary_work" --claude "$FAKE_CLAUDE" \
+  --title "findings summary" -- "review only" > "$TMP_ROOT/findings-summary.out"
+findings_summary_text="$("$CC_WATCH" findings --cwd "$findings_summary_work" --last)"
+assert_contains "$findings_summary_text" "## Summary"
+assert_contains "$findings_summary_text" "## Analysis"
+assert_contains "$findings_summary_text" "Substantive analysis body"
+assert_not_contains "$findings_summary_text" "Ignored appendix"
 
 empty_list_work="$(new_workdir empty-list)"
 empty_list="$("$CC_WATCH" list --cwd "$empty_list_work")"
@@ -881,6 +939,23 @@ assert_json_file "$TMP_ROOT/running-list.json"
 assert_contains "$running_list_json" "\"job_id\" : \"$cancel_job\""
 assert_contains "$running_list_json" '"status" : "running-'
 assert_contains "$running_list_json" '"exit_code" : null'
+set +e
+"$CC_WATCH" findings "$cancel_job" --cwd "$cancel_work" > "$TMP_ROOT/running-findings.out" 2>&1
+running_findings_code="$?"
+set -e
+if [ "$running_findings_code" -ne 2 ]; then
+  fail "running findings should return 2, got $running_findings_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/running-findings.out")" "running-"
+set +e
+"$CC_WATCH" findings "$cancel_job" --cwd "$cancel_work" --json > "$TMP_ROOT/running-findings.json" 2>&1
+running_findings_json_code="$?"
+set -e
+if [ "$running_findings_json_code" -ne 2 ]; then
+  fail "running findings --json should return 2, got $running_findings_json_code"
+fi
+assert_json_file "$TMP_ROOT/running-findings.json"
+assert_contains "$(cat "$TMP_ROOT/running-findings.json")" '"sections" : []'
 set +e
 "$CC_WATCH" result "$cancel_job" --cwd "$cancel_work" --json > "$TMP_ROOT/running-result.json" 2>&1
 running_result_code="$?"

@@ -17,6 +17,7 @@ Usage:
   cc-watch result <job-id> [--cwd DIR] [--state-root DIR] [--json]
   cc-watch list [--cwd DIR] [--state-root DIR] [--json]
   cc-watch show [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
+  cc-watch findings [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--json]
   cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
   cc-watch cancel <job-id> [--cwd DIR] [--state-root DIR]
   cc-watch archive [--cwd DIR] [--state-root DIR] [--older-than-days N] [--keep N] [--all-terminal] [--yes]
@@ -2029,6 +2030,199 @@ cmd_show() {
   esac
 }
 
+parse_findings_options() {
+  CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
+  FINDINGS_SELECTOR=""
+  FINDINGS_LAST=0
+  FINDINGS_JSON=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
+        ;;
+      --last)
+        [ -z "$FINDINGS_SELECTOR" ] || die "--last cannot be combined with a selector"
+        FINDINGS_LAST=1
+        shift
+        ;;
+      --json)
+        FINDINGS_JSON=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        [ -z "$FINDINGS_SELECTOR" ] || die "findings accepts only one selector"
+        [ "$FINDINGS_LAST" = "0" ] || die "--last cannot be combined with a selector"
+        FINDINGS_SELECTOR="$1"
+        shift
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
+}
+
+render_findings_segments() {
+  local format="$1"
+  local source_path="$2"
+  local title
+  title="$(read_file "$JOB_DIR/title" | redact_stream)"
+  redact_stream < "$source_path" | perl -MJSON::PP -CS -e '
+    my ($format, $job_id, $title, $status, $source_path) = @ARGV;
+    local $/;
+    my $text = <STDIN>;
+    $text = "" unless defined $text;
+
+    sub trim {
+      my ($value) = @_;
+      $value =~ s/\A\s+//;
+      $value =~ s/\s+\z//;
+      return $value;
+    }
+
+    my @lines = split /(?<=\n)/, $text;
+    my @heads;
+    my $in_fence = 0;
+    for (my $i = 0; $i < @lines; $i++) {
+      my $line = $lines[$i];
+      if ($line =~ /^\s*(```|~~~)/) {
+        $in_fence = !$in_fence;
+        next;
+      }
+      next if $in_fence;
+      if ($line =~ /^(#{1,6})[ \t]+(.+?)\s*$/) {
+        push @heads, { index => $i, level => length($1), heading => trim($2) };
+      }
+    }
+
+    my @segments;
+    my $covered_until = -1;
+    my $match_re = qr/(findings?|review|verdict|summary|analysis|details?|concerns?|bugs?|suggestions?|action[ -]?items?|notes?|conclusions?|recommendations?|severity|impact|should[- ]?fix|block(?:er|ing)?|issues?|risks?|minor|nits?|coverage|questions?|observations?)/i;
+    for (my $h = 0; $h < @heads; $h++) {
+      my $head = $heads[$h];
+      next if $head->{index} < $covered_until;
+      next unless $head->{heading} =~ $match_re;
+      my $end = scalar @lines;
+      for (my $n = $h + 1; $n < @heads; $n++) {
+        if ($heads[$n]{level} <= $head->{level}) {
+          $end = $heads[$n]{index};
+          last;
+        }
+      }
+      my $body = join("", @lines[$head->{index} .. $end - 1]);
+      push @segments, {
+        heading => $head->{heading},
+        level => $head->{level},
+        text => trim($body),
+      };
+      $covered_until = $end;
+    }
+
+    if (!@segments && trim($text) ne "") {
+      push @segments, { heading => undef, level => undef, text => trim($text) };
+    }
+
+    if ($format eq "json") {
+      my %payload = (
+        job_id => $job_id,
+        title => length($title) ? $title : undef,
+        status => $status,
+        source_path => $source_path,
+        sections => \@segments,
+      );
+      print JSON::PP->new->ascii(0)->canonical->pretty->encode(\%payload);
+    } else {
+      print join("\n\n", map { $_->{text} } @segments);
+      print "\n" if @segments;
+    }
+  ' "$format" "$JOB_ID" "$title" "$(read_file "$JOB_DIR/status")" "$source_path"
+}
+
+cmd_findings() {
+  parse_findings_options "$@"
+
+  if [ "$FINDINGS_LAST" = "1" ] || [ -z "$FINDINGS_SELECTOR" ]; then
+    JOB_DIR="$(latest_job_dir)" || die "no cc-watch jobs in: $STATE_ROOT"
+  else
+    JOB_DIR="$(resolve_job_selector "$FINDINGS_SELECTOR")" || die "unknown job or title: $FINDINGS_SELECTOR"
+  fi
+  JOB_ID="$(read_file "$JOB_DIR/job_id")"
+
+  local status source_path
+  status="$(read_file "$JOB_DIR/status")"
+  if ! terminal_status "$status"; then
+    if [ "$FINDINGS_JSON" = "1" ]; then
+      local title
+      title="$(read_file "$JOB_DIR/title" | redact_stream)"
+      perl -MJSON::PP -CS -e '
+        my %payload = (
+          job_id => $ARGV[0],
+          title => length($ARGV[1]) ? $ARGV[1] : undef,
+          status => $ARGV[2],
+          source_path => undef,
+          sections => [],
+        );
+        print JSON::PP->new->ascii(0)->canonical->pretty->encode(\%payload);
+      ' "$JOB_ID" "$title" "$(job_status_word)"
+    else
+      render_status
+    fi
+    return 2
+  fi
+
+  if [ ! -s "$JOB_DIR/final-text.txt" ] && [ ! -s "$JOB_DIR/result.txt" ]; then
+    wait_for_result_archive || true
+  fi
+
+  if [ -s "$JOB_DIR/final-text.txt" ]; then
+    source_path="$JOB_DIR/final-text.txt"
+  elif [ -s "$JOB_DIR/result.txt" ]; then
+    source_path="$JOB_DIR/result.txt"
+  else
+    if [ "$FINDINGS_JSON" = "1" ]; then
+      local title
+      title="$(read_file "$JOB_DIR/title" | redact_stream)"
+      perl -MJSON::PP -CS -e '
+        my %payload = (
+          job_id => $ARGV[0],
+          title => length($ARGV[1]) ? $ARGV[1] : undef,
+          status => $ARGV[2],
+          source_path => undef,
+          sections => [],
+        );
+        print JSON::PP->new->ascii(0)->canonical->pretty->encode(\%payload);
+      ' "$JOB_ID" "$title" "$status"
+      return "$(status_exit_code)"
+    fi
+    die "no result archive found for job: $JOB_ID"
+  fi
+
+  if [ "$FINDINGS_JSON" = "1" ]; then
+    render_findings_segments json "$source_path"
+  else
+    render_findings_segments text "$source_path"
+  fi
+  return "$(status_exit_code)"
+}
+
 parse_resume_options() {
   CWD="."
   STATE_ROOT_RAW=""
@@ -2612,6 +2806,7 @@ main() {
     start) cmd_start "$@" ;;
     list) cmd_list "$@" ;;
     show) cmd_show "$@" ;;
+    findings) cmd_findings "$@" ;;
     status)
       parse_job_options "$@"
       render_status

@@ -89,11 +89,15 @@ Use `list` and `show` to find and read archived jobs without copying job ids:
 claude-code-companion/scripts/cc-watch list --cwd .
 claude-code-companion/scripts/cc-watch list --cwd . --json
 claude-code-companion/scripts/cc-watch show --cwd . --last
+claude-code-companion/scripts/cc-watch findings --cwd . --last
 claude-code-companion/scripts/cc-watch show --cwd . repo-review --transcript
 ```
 
 Use `list --json` when Codex or another script needs a newest-first structured
 job list with status, session, timing, and archive paths.
+Use `findings` when Codex needs the review sections from a finished job without
+re-reading the full transcript; it preserves the matched Markdown sections and
+also supports `--json`.
 
 Clean up old local job archives with dry-run-first commands:
 

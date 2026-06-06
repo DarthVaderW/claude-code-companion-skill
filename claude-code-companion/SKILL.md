@@ -158,6 +158,13 @@ Use `result --json` when Codex needs the metadata and final answer in one
 machine-readable object while preserving the same exit-code contract.
 Use `list --json` when Codex needs a newest-first machine-readable index of
 local jobs, including status, session resumability, timing, and archive paths.
+Use `findings` or `findings --json` when Codex needs a compact, section-based
+view of the review result without loading the full transcript:
+
+```bash
+scripts/cc-watch findings --cwd . --last
+scripts/cc-watch findings --cwd . repo-review --json
+```
 
 For Claude Code plugin inspection, use the read-only sibling helper:
 
