@@ -5,14 +5,16 @@ QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
 ALLOWED_READONLY_TOOLS="Read,Grep,Glob,LS"
+REVIEW_DIFF_MAX_BYTES_DEFAULT=60000
 
 usage() {
   cat <<'EOF'
 Usage:
   cc-watch run [options] -- PROMPT
+  cc-watch review-diff [options] [--base REF] [--max-diff-bytes N]
   cc-watch start [options] -- PROMPT
   cc-watch status <job-id> [--cwd DIR] [--state-root DIR] [--strict-exit]
-  cc-watch result <job-id> [--cwd DIR] [--state-root DIR]
+  cc-watch result <job-id> [--cwd DIR] [--state-root DIR] [--json]
   cc-watch list [--cwd DIR] [--state-root DIR]
   cc-watch show [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
   cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
@@ -42,6 +44,10 @@ Options:
   --max-runtime SEC     Maximum job runtime before timeout. Default: 1800.
   --heartbeat SEC       For foreground run/resume, print compact progress every
                         SEC seconds. 0 disables it. Default: 0.
+  --base REF            review-diff base ref. Default: origin/main, main,
+                        master, then HEAD, whichever resolves first.
+  --max-diff-bytes N    Maximum tracked diff bytes embedded by review-diff.
+                        Default: 60000. 0 disables truncation.
   --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
   --allow-mcp           Load Claude Code MCP config instead of strict empty MCP.
   --mcp-tool TOOL       Load MCP config and add one explicit MCP tool to the
@@ -240,6 +246,52 @@ validate_tool_name() {
   fi
 }
 
+validate_git_ref() {
+  local ref="$1"
+  [ -n "$ref" ] || die "--base requires a non-empty value"
+  case "$ref" in
+    -*) die "--base cannot start with -" ;;
+    *'
+'*) die "--base cannot contain newlines" ;;
+    *[[:space:]]*) die "--base cannot contain whitespace" ;;
+  esac
+  if printf '%s' "$ref" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "--base cannot contain control characters"
+  fi
+}
+
+default_review_base() {
+  local repo="$1"
+  local candidate
+  for candidate in origin/main main master HEAD; do
+    if git -C "$repo" rev-parse --verify -q "$candidate^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+truncate_to_bytes() {
+  local max_bytes="$1"
+  validate_nonnegative_int "--max-diff-bytes" "$max_bytes"
+  if [ "$max_bytes" -eq 0 ]; then
+    cat
+    return 0
+  fi
+  perl -e '
+    use bytes;
+    my $max = shift @ARGV;
+    local $/;
+    my $text = <STDIN>;
+    $text = "" unless defined $text;
+    if (length($text) > $max) {
+      $text = substr($text, 0, $max) . "\n\n[cc-watch: tracked diff truncated at ${max} bytes]\n";
+    }
+    print $text;
+  ' "$max_bytes"
+}
+
 target_repo_summary() {
   local repo head
   repo="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -344,6 +396,11 @@ parse_run_options() {
   RESUMED_FROM=""
   PROMPT_FILE=""
   PROMPT_ARGS=()
+  REVIEW_KIND=""
+  REVIEW_BASE=""
+  REVIEW_BASE_COMMIT=""
+  REVIEW_DIFF_BYTES="0"
+  REVIEW_DIFF_TRUNCATED="0"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -472,6 +529,145 @@ parse_run_options() {
   resolve_state_root
 }
 
+parse_review_diff_options() {
+  local requested_base=""
+  REVIEW_MAX_DIFF_BYTES="$REVIEW_DIFF_MAX_BYTES_DEFAULT"
+  local run_args=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --base)
+        [ "$#" -ge 2 ] || die "--base requires a value"
+        requested_base="$2"
+        validate_git_ref "$requested_base"
+        shift 2
+        ;;
+      --max-diff-bytes)
+        [ "$#" -ge 2 ] || die "--max-diff-bytes requires a value"
+        REVIEW_MAX_DIFF_BYTES="$2"
+        validate_nonnegative_int "--max-diff-bytes" "$REVIEW_MAX_DIFF_BYTES"
+        shift 2
+        ;;
+      --allow-bash|--allow-mcp|--mcp-tool|--read-write|--resume|--continue)
+        die "review-diff is read-only and manages its own prompt; use cc-watch run for custom tools or session flags"
+        ;;
+      --)
+        die "review-diff builds its own prompt; pass extra context through a normal cc-watch run prompt"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        run_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "${#run_args[@]}" -gt 0 ]; then
+    parse_run_options "${run_args[@]}"
+  else
+    parse_run_options
+  fi
+  if [ -n "$PROMPT_FILE" ] || [ "${#PROMPT_ARGS[@]}" -gt 0 ]; then
+    die "review-diff builds its own prompt and cannot combine with --prompt-file or prompt text"
+  fi
+
+  REVIEW_KIND="diff"
+  REVIEW_BASE="$requested_base"
+  if [ -z "$TITLE" ]; then
+    TITLE="review-diff"
+  fi
+}
+
+build_review_diff_prompt() {
+  local repo base_commit branch_status untracked raw_diff diff_for_prompt
+  local raw_diff_bytes stat_text truncated_marker
+
+  repo="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$repo" ] || die "review-diff requires --cwd to be inside a git repository"
+  if [ -z "$REVIEW_BASE" ]; then
+    REVIEW_BASE="$(default_review_base "$repo")" || die "could not choose a default review base; pass --base REF"
+  fi
+  validate_git_ref "$REVIEW_BASE"
+  base_commit="$(git -C "$repo" rev-parse --verify "$REVIEW_BASE^{commit}" 2>/dev/null || true)"
+  [ -n "$base_commit" ] || die "review-diff base ref does not resolve to a commit: $REVIEW_BASE"
+  REVIEW_BASE_COMMIT="$base_commit"
+
+  raw_diff="$(
+    {
+      git -C "$repo" diff --no-ext-diff --no-textconv "$base_commit"...HEAD --
+      git -C "$repo" diff --no-ext-diff --no-textconv --cached --
+      git -C "$repo" diff --no-ext-diff --no-textconv --
+    } 2>/dev/null
+  )"
+  if ! printf '%s' "$raw_diff" | grep -q .; then
+    die "review-diff found no tracked diff; untracked files are intentionally not embedded"
+  fi
+  raw_diff_bytes="$(printf '%s' "$raw_diff" | wc -c | tr -d ' ')"
+  REVIEW_DIFF_BYTES="$raw_diff_bytes"
+  REVIEW_DIFF_TRUNCATED=0
+  if [ "$REVIEW_MAX_DIFF_BYTES" -gt 0 ] && [ "$raw_diff_bytes" -gt "$REVIEW_MAX_DIFF_BYTES" ]; then
+    REVIEW_DIFF_TRUNCATED=1
+  fi
+  diff_for_prompt="$(printf '%s' "$raw_diff" | truncate_to_bytes "$REVIEW_MAX_DIFF_BYTES")"
+  branch_status="$(git -C "$repo" status --short --branch 2>/dev/null || true)"
+  untracked="$(printf '%s\n' "$branch_status" | awk 'substr($0, 1, 2) == "??" { print }')"
+  stat_text="$(
+    {
+      printf '## base...HEAD\n'
+      git -C "$repo" diff --no-ext-diff --no-textconv --stat "$base_commit"...HEAD -- 2>/dev/null || true
+      printf '\n## staged\n'
+      git -C "$repo" diff --no-ext-diff --no-textconv --stat --cached -- 2>/dev/null || true
+      printf '\n## unstaged\n'
+      git -C "$repo" diff --no-ext-diff --no-textconv --stat -- 2>/dev/null || true
+    }
+  )"
+  truncated_marker="no"
+  [ "$REVIEW_DIFF_TRUNCATED" = "1" ] && truncated_marker="yes"
+
+  REVIEW_PROMPT="$(cat <<EOF
+Task:
+Review the current tracked git diff as a read-only second reviewer.
+
+Context:
+- cwd: $CWD
+- repo: $repo
+- base_ref: $REVIEW_BASE
+- base_commit: $REVIEW_BASE_COMMIT
+- diff_bytes: $REVIEW_DIFF_BYTES
+- diff_truncated: $truncated_marker
+- constraints: do not edit files; do not request or print secrets; treat this embedded diff as the review source.
+
+Review priorities:
+- Bugs, security or data-boundary risks, behavioral regressions, missing tests.
+- Keep findings actionable and grounded in files or changed behavior.
+- If no blocking issue exists, say so and mention residual risk.
+
+Git status:
+\`\`\`text
+$branch_status
+\`\`\`
+
+Untracked files:
+\`\`\`text
+${untracked:-none listed; untracked content is intentionally not embedded}
+\`\`\`
+
+Diff stat:
+\`\`\`text
+$stat_text
+\`\`\`
+
+Tracked diff:
+\`\`\`diff
+$diff_for_prompt
+\`\`\`
+EOF
+)"
+}
+
 parse_job_options() {
   CWD="."
   STATE_ROOT_RAW=""
@@ -501,6 +697,52 @@ parse_job_options() {
         ;;
       --strict-exit)
         STRICT_EXIT=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
+  JOB_DIR="$(job_dir_for "$STATE_ROOT" "$JOB_ID")"
+}
+
+parse_result_options() {
+  CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
+  JOB_ID=""
+  RESULT_JSON=0
+
+  [ "$#" -ge 1 ] || die "missing job id"
+  JOB_ID="$1"
+  shift
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
+        ;;
+      --json)
+        RESULT_JSON=1
         shift
         ;;
       -h|--help)
@@ -588,6 +830,11 @@ write_config() {
   write_file "$JOB_DIR/continue_session" "$CONTINUE_SESSION"
   write_file "$JOB_DIR/resumed_from" "$RESUMED_FROM"
   write_file "$JOB_DIR/prompt_file" "$PROMPT_FILE"
+  write_file "$JOB_DIR/review_kind" "${REVIEW_KIND:-}"
+  write_file "$JOB_DIR/review_base" "${REVIEW_BASE:-}"
+  write_file "$JOB_DIR/review_base_commit" "${REVIEW_BASE_COMMIT:-}"
+  write_file "$JOB_DIR/review_diff_bytes" "${REVIEW_DIFF_BYTES:-0}"
+  write_file "$JOB_DIR/review_diff_truncated" "${REVIEW_DIFF_TRUNCATED:-0}"
   write_file "$JOB_DIR/status" "starting"
   write_file "$JOB_DIR/started_at" "$(now_epoch)"
   write_file "$JOB_DIR/last_event_at" "0"
@@ -637,6 +884,11 @@ load_config() {
   CONTINUE_SESSION="$(read_file "$JOB_DIR/continue_session")"
   RESUMED_FROM="$(read_file "$JOB_DIR/resumed_from")"
   PROMPT_FILE="$(read_file "$JOB_DIR/prompt_file")"
+  REVIEW_KIND="$(read_file "$JOB_DIR/review_kind")"
+  REVIEW_BASE="$(read_file "$JOB_DIR/review_base")"
+  REVIEW_BASE_COMMIT="$(read_file "$JOB_DIR/review_base_commit")"
+  REVIEW_DIFF_BYTES="$(read_file "$JOB_DIR/review_diff_bytes")"
+  REVIEW_DIFF_TRUNCATED="$(read_file "$JOB_DIR/review_diff_truncated")"
 }
 
 terminal_status() {
@@ -899,7 +1151,12 @@ write_metadata_files() {
     printf '  "allow_mcp": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_mcp")" | json_string)"
     printf '  "mcp_tools": %s,\n' "$(json_string_array_file "$JOB_DIR/mcp_tools")"
     printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
-    printf '  "prompt_file": %s\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
+    printf '  "prompt_file": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
+    printf '  "review_kind": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/review_kind")" | json_string)"
+    printf '  "review_base": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/review_base")" | json_string)"
+    printf '  "review_base_commit": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/review_base_commit")" | json_string)"
+    printf '  "review_diff_bytes": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/review_diff_bytes")" | json_string)"
+    printf '  "review_diff_truncated": %s\n' "$(printf '%s' "$(read_file "$JOB_DIR/review_diff_truncated")" | json_string)"
     printf '}\n'
   } | redact_stream > "$tmp_json"
   mv "$tmp_json" "$JOB_DIR/metadata.json"
@@ -930,6 +1187,13 @@ write_metadata_files() {
     fi
     if [ -n "$resumed_from" ]; then
       printf '%s\n' "- resumed_from: \`$resumed_from\`"
+    fi
+    if [ -n "$(read_file "$JOB_DIR/review_kind")" ]; then
+      printf '%s\n' "- review_kind: \`$(read_file "$JOB_DIR/review_kind")\`"
+      printf '%s\n' "- review_base: \`$(read_file "$JOB_DIR/review_base")\`"
+      printf '%s\n' "- review_base_commit: \`$(read_file "$JOB_DIR/review_base_commit")\`"
+      printf '%s\n' "- review_diff_bytes: \`$(read_file "$JOB_DIR/review_diff_bytes")\`"
+      printf '%s\n' "- review_diff_truncated: \`$(read_file "$JOB_DIR/review_diff_truncated")\`"
     fi
     if [ -n "$warnings" ]; then
       printf '\n## Warnings\n\n'
@@ -1013,6 +1277,61 @@ write_result_archive() {
   } | redact_stream > "$tmp_result"
   mv "$tmp_result" "$JOB_DIR/result.txt"
   write_transcript_file "$reason"
+}
+
+render_result_json() {
+  local metadata_file="$JOB_DIR/metadata.json"
+  [ -s "$metadata_file" ] || write_metadata_files
+  local redacted_result_file="$JOB_DIR/final-text.redacted.$$"
+  if [ -s "$JOB_DIR/final-text.txt" ]; then
+    redact_stream < "$JOB_DIR/final-text.txt" > "$redacted_result_file"
+  elif [ -f "$JOB_DIR/result.txt" ]; then
+    redact_stream < "$JOB_DIR/result.txt" > "$redacted_result_file"
+  else
+    : > "$redacted_result_file"
+  fi
+  perl -MJSON::PP -CS -e '
+    my ($metadata_file, $result_text_file, $result_file, $transcript_file) = @ARGV;
+    local $/;
+    open my $mf, "<:encoding(UTF-8)", $metadata_file or die "cannot read metadata\n";
+    my $metadata = JSON::PP->new->decode(<$mf>);
+    my $result_text = "";
+    if (open my $rf, "<:encoding(UTF-8)", $result_text_file) {
+      $result_text = <$rf>;
+      $result_text = "" unless defined $result_text;
+    }
+    $metadata->{result_text} = $result_text;
+    $metadata->{result_path} = $result_file;
+    $metadata->{transcript_path} = $transcript_file;
+    print JSON::PP->new->ascii(0)->canonical->pretty->encode($metadata);
+  ' "$metadata_file" "$redacted_result_file" "$JOB_DIR/result.txt" "$JOB_DIR/transcript.md"
+  rm -f "$redacted_result_file"
+}
+
+render_nonterminal_result_json() {
+  local rendered exit_code elapsed session title
+  rendered="$(job_status_word)"
+  elapsed="$(job_elapsed_seconds)"
+  session="$(read_file "$JOB_DIR/session_id")"
+  title="$(read_file "$JOB_DIR/title")"
+  perl -MJSON::PP -CS -e '
+    my %value = (
+      job_id => $ARGV[0],
+      title => $ARGV[1],
+      status => $ARGV[2],
+      exit_code => undef,
+      cwd => $ARGV[4],
+      state_root => $ARGV[5],
+      elapsed_seconds => 0 + $ARGV[6],
+      session_id => $ARGV[7],
+      result_text => "",
+      result_path => $ARGV[8],
+      transcript_path => $ARGV[9],
+    );
+    print JSON::PP->new->ascii(0)->canonical->pretty->encode(\%value);
+  ' "$JOB_ID" "$title" "$rendered" "" "$(read_file "$JOB_DIR/cwd")" \
+    "$(read_file "$JOB_DIR/state_root")" "$elapsed" "$session" \
+    "$JOB_DIR/result.txt" "$JOB_DIR/transcript.md"
 }
 
 build_claude_args() {
@@ -1646,6 +1965,11 @@ parse_resume_options() {
   PROMPT_FILE=""
   PROMPT_ARGS=()
   RESUME_SELECTOR=""
+  REVIEW_KIND=""
+  REVIEW_BASE=""
+  REVIEW_BASE_COMMIT=""
+  REVIEW_DIFF_BYTES="0"
+  REVIEW_DIFF_TRUNCATED="0"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1836,6 +2160,14 @@ cmd_run() {
   run_foreground_job
 }
 
+cmd_review_diff() {
+  parse_review_diff_options "$@"
+  REVIEW_PROMPT=""
+  build_review_diff_prompt
+  PROMPT_ARGS=("$REVIEW_PROMPT")
+  run_foreground_job
+}
+
 cmd_resume() {
   parse_resume_options "$@"
   resolve_resume_session "$RESUME_SELECTOR"
@@ -1860,19 +2192,27 @@ cmd_start() {
 }
 
 cmd_result() {
-  parse_job_options "$@"
+  parse_result_options "$@"
   [ -d "$JOB_DIR" ] || die "unknown job: $JOB_ID"
 
   local status
   status="$(read_file "$JOB_DIR/status")"
   if terminal_status "$status" && [ -f "$JOB_DIR/result.txt" ]; then
     wait_for_result_archive || write_result_archive "Result archive was empty when requested after terminal status."
-    redact_stream < "$JOB_DIR/result.txt"
-    printf '\n'
+    if [ "$RESULT_JSON" = "1" ]; then
+      render_result_json
+    else
+      redact_stream < "$JOB_DIR/result.txt"
+      printf '\n'
+    fi
     return "$(status_exit_code)"
   fi
 
-  render_status
+  if [ "$RESULT_JSON" = "1" ]; then
+    render_nonterminal_result_json
+  else
+    render_status
+  fi
   return 2
 }
 
@@ -2180,6 +2520,7 @@ main() {
 
   case "$command" in
     run) cmd_run "$@" ;;
+    review-diff) cmd_review_diff "$@" ;;
     resume) cmd_resume "$@" ;;
     start) cmd_start "$@" ;;
     list) cmd_list "$@" ;;

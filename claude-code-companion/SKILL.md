@@ -69,6 +69,18 @@ For short synchronous work:
 scripts/cc-watch run --cwd . --title release-review -- "Review the current diff. Return only actionable findings."
 ```
 
+For a standard read-only diff review, prefer the built-in prompt builder:
+
+```bash
+scripts/cc-watch review-diff --cwd . --base origin/main --title release-review
+```
+
+`review-diff` builds the prompt from tracked git changes and then uses the
+normal foreground `run` path. It includes committed, staged, and unstaged
+tracked diffs, records the base ref in metadata, and sends that raw diff to
+Claude. It intentionally does not embed untracked file contents. Use
+`--max-diff-bytes N` for very large diffs.
+
 For long prompts:
 
 ```bash
@@ -142,6 +154,8 @@ and the last assistant text before failure when available. `result` prints
 `result.txt` for any terminal job and exits non-zero for failed, timed-out, or
 canceled jobs. `status` returns zero for running jobs by default; use
 `--strict-exit` only when a script needs polling-style non-zero exits.
+Use `result --json` when Codex needs the metadata and final answer in one
+machine-readable object while preserving the same exit-code contract.
 
 For Claude Code plugin inspection, use the read-only sibling helper:
 

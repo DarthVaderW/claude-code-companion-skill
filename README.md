@@ -25,6 +25,18 @@ Run directly from this checkout:
 claude-code-companion/scripts/cc-watch run --cwd . --title release-review -- "Review the current changes."
 ```
 
+For the common "review my current branch/diff" case, let `cc-watch` build the
+prompt from tracked git changes and keep Claude in the default read-only mode:
+
+```bash
+claude-code-companion/scripts/cc-watch review-diff --cwd . --base origin/main --title release-review
+```
+
+`review-diff` embeds committed, staged, and unstaged tracked diffs in
+`prompt.md`; that raw diff is also sent to Claude. It intentionally does not
+embed untracked file contents. Use `--max-diff-bytes N` to cap the diff included
+in the prompt.
+
 For long prompts, store the prompt in a Markdown file and pass it explicitly:
 
 ```bash
@@ -64,7 +76,13 @@ claude-code-companion/scripts/cc-watch run --cwd . --heartbeat 60 --max-runtime 
 `status` returns zero for running jobs by default. Existing polling loops should
 pass `--strict-exit` when they need non-zero exits for `running-*`.
 `result` prints `result.txt` for any terminal job and exits non-zero for
-failed, timed-out, or canceled jobs.
+failed, timed-out, or canceled jobs. Pass `result --json` when Codex or another
+script needs the metadata plus final answer as a single machine-readable object:
+
+```bash
+claude-code-companion/scripts/cc-watch result "$job_id" --cwd . --json
+```
+
 Use `list` and `show` to find and read archived jobs without copying job ids:
 
 ```bash

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `cc-watch review-diff` to build a read-only review prompt from tracked
+  git diffs and run it through the existing foreground watcher path.
+- Add `cc-watch result --json` for machine-readable result metadata plus final
+  answer text while preserving the existing exit-code contract.
+
 ## v0.5.0 - 2026-06-07
 
 - Add foreground `cc-watch --heartbeat SEC` progress lines for long `run` and

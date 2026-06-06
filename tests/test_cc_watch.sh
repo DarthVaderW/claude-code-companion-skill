@@ -173,6 +173,18 @@ new_workdir() {
   printf '%s\n' "$dir"
 }
 
+new_git_workdir() {
+  local dir
+  dir="$(new_workdir "$1")"
+  git -C "$dir" init -q
+  git -C "$dir" config user.email cc-watch-test@example.invalid
+  git -C "$dir" config user.name "cc-watch test"
+  printf 'base\n' > "$dir/file.txt"
+  git -C "$dir" add file.txt
+  git -C "$dir" commit -qm "base"
+  printf '%s\n' "$dir"
+}
+
 run_success_with_behavior() {
   local label="$1"
   local behavior="$2"
@@ -207,6 +219,11 @@ assert_contains "$default_args" "--tools Read,Grep,Glob,LS"
 assert_contains "$default_args" "--strict-mcp-config --mcp-config {\"mcpServers\":{}}"
 assert_not_contains "$default_args" "--disallowed-tools"
 assert_not_contains "$default_args" "Bash"
+default_job="$(job_id_for_work "$TMP_ROOT/work-default")"
+"$CC_WATCH" result "$default_job" --cwd "$TMP_ROOT/work-default" --json > "$TMP_ROOT/default-result.json"
+assert_json_file "$TMP_ROOT/default-result.json"
+assert_contains "$(cat "$TMP_ROOT/default-result.json")" '"result_text"'
+assert_contains "$(cat "$TMP_ROOT/default-result.json")" "fake final review"
 
 allow_bash_args="$(run_success allow-bash --allow-bash)"
 assert_contains "$allow_bash_args" "--tools Read,Grep,Glob,LS,Bash"
@@ -260,6 +277,67 @@ if FAKE_ARGS_LOG="$TMP_ROOT/bad-title.args" FAKE_BEHAVIOR=success \
   fail "title with slash should fail"
 fi
 
+review_work="$(new_git_workdir review-diff)"
+printf 'base\nchange\n' > "$review_work/file.txt"
+review_args="$TMP_ROOT/review-diff.args"
+FAKE_ARGS_LOG="$review_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" review-diff --cwd "$review_work" --claude "$FAKE_CLAUDE" --base HEAD \
+  --max-diff-bytes 100000 > "$TMP_ROOT/review-diff.out"
+review_dir="$(job_dir_for_work "$review_work")"
+review_args_text="$(tail -1 "$review_args")"
+assert_contains "$(cat "$TMP_ROOT/review-diff.out")" "fake final review"
+assert_contains "$review_args_text" "--tools Read,Grep,Glob,LS"
+assert_contains "$review_args_text" "--strict-mcp-config"
+assert_not_contains "$review_args_text" "Bash"
+assert_contains "$(cat "$review_dir/prompt.md")" "base_ref: HEAD"
+assert_contains "$(cat "$review_dir/prompt.md")" "+change"
+assert_contains "$(cat "$review_dir/metadata.json")" '"review_kind": "diff"'
+assert_contains "$(cat "$review_dir/metadata.json")" '"review_base": "HEAD"'
+assert_contains "$(cat "$review_dir/metadata.json")" '"review_diff_truncated": "0"'
+
+review_trunc_work="$(new_git_workdir review-diff-truncated)"
+printf 'base\nvery long change line\n' > "$review_trunc_work/file.txt"
+FAKE_ARGS_LOG="$TMP_ROOT/review-diff-truncated.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" review-diff --cwd "$review_trunc_work" --claude "$FAKE_CLAUDE" --base HEAD \
+  --max-diff-bytes 10 > "$TMP_ROOT/review-diff-truncated.out"
+review_trunc_dir="$(job_dir_for_work "$review_trunc_work")"
+assert_contains "$(cat "$review_trunc_dir/prompt.md")" "tracked diff truncated at 10 bytes"
+assert_contains "$(cat "$review_trunc_dir/metadata.json")" '"review_diff_truncated": "1"'
+
+review_default_work="$(new_git_workdir review-diff-default)"
+printf 'base\ndefault base change\n' > "$review_default_work/file.txt"
+printf 'untracked secret should stay out\n' > "$review_default_work/secret.txt"
+(
+  cd "$review_default_work"
+  CLAUDE_BIN="$FAKE_CLAUDE" FAKE_ARGS_LOG="$TMP_ROOT/review-diff-default.args" FAKE_BEHAVIOR=success \
+    "$CC_WATCH" review-diff > "$TMP_ROOT/review-diff-default.out"
+)
+review_default_dir="$(job_dir_for_work "$review_default_work")"
+assert_contains "$(cat "$TMP_ROOT/review-diff-default.out")" "fake final review"
+assert_contains "$(cat "$review_default_dir/prompt.md")" "default base change"
+assert_contains "$(cat "$review_default_dir/prompt.md")" "?? secret.txt"
+assert_not_contains "$(cat "$review_default_dir/prompt.md")" "untracked secret should stay out"
+assert_contains "$(cat "$review_default_dir/metadata.json")" '"review_kind": "diff"'
+assert_contains "$(cat "$review_default_dir/metadata.json")" '"review_base":'
+
+review_clean_work="$(new_git_workdir review-diff-clean)"
+if FAKE_ARGS_LOG="$TMP_ROOT/review-diff-clean.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" review-diff --cwd "$review_clean_work" --claude "$FAKE_CLAUDE" --base HEAD >/dev/null 2>&1; then
+  fail "review-diff clean tree should fail"
+fi
+[ ! -d "$review_clean_work/.cc-watch" ] || fail "review-diff clean tree should not create a job"
+
+if FAKE_ARGS_LOG="$TMP_ROOT/review-diff-bad-base.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" review-diff --cwd "$review_work" --claude "$FAKE_CLAUDE" --base --bad >/dev/null 2>&1; then
+  fail "review-diff bad base should fail"
+fi
+[ ! -f "$TMP_ROOT/review-diff-bad-base.args" ] || fail "review-diff bad base spawned Claude"
+if FAKE_ARGS_LOG="$TMP_ROOT/review-diff-allow-bash.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" review-diff --cwd "$review_work" --claude "$FAKE_CLAUDE" --base HEAD --allow-bash >/dev/null 2>&1; then
+  fail "review-diff --allow-bash should fail"
+fi
+[ ! -f "$TMP_ROOT/review-diff-allow-bash.args" ] || fail "review-diff --allow-bash spawned Claude"
+
 bad_work="$(new_workdir mutual-exclusion)"
 bad_args_log="$TMP_ROOT/mutual-exclusion.args"
 if FAKE_ARGS_LOG="$bad_args_log" FAKE_BEHAVIOR=success \
@@ -287,6 +365,16 @@ if [ "$no_result_code" -ne 1 ]; then
 fi
 assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "NO FINAL RESULT"
 assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "did not emit a final result"
+set +e
+"$CC_WATCH" result "$no_result_job" --cwd "$no_result_work" --json > "$TMP_ROOT/no-result-result.json" 2>&1
+no_result_json_code="$?"
+set -e
+if [ "$no_result_json_code" -ne 1 ]; then
+  fail "no-result result --json should return 1, got $no_result_json_code"
+fi
+assert_json_file "$TMP_ROOT/no-result-result.json"
+assert_contains "$(cat "$TMP_ROOT/no-result-result.json")" '"status" : "failed"'
+assert_contains "$(cat "$TMP_ROOT/no-result-result.json")" "NO FINAL RESULT"
 assert_contains "$(cat "$(job_dir_for_work "$no_result_work")/metadata.json")" '"status": "failed"'
 assert_json_file "$(job_dir_for_work "$no_result_work")/metadata.json"
 no_result_status="$("$CC_WATCH" status "$no_result_job" --cwd "$no_result_work" || true)"
@@ -469,6 +557,10 @@ secret_run_text="$(cat "$TMP_ROOT/secret-run.out")"
 secret_result_text="$(cat "$secret_dir/result.txt")"
 secret_transcript_text="$(cat "$secret_dir/transcript.md")"
 secret_show_raw="$("$CC_WATCH" show --cwd "$secret_work" "$secret_job" --raw)"
+"$CC_WATCH" result "$secret_job" --cwd "$secret_work" --json > "$TMP_ROOT/secret-result.json"
+assert_json_file "$TMP_ROOT/secret-result.json"
+assert_contains "$(cat "$TMP_ROOT/secret-result.json")" "Authorization: Bearer REDACTED"
+assert_not_contains "$(cat "$TMP_ROOT/secret-result.json")" "SECRET123"
 assert_contains "$secret_run_text" "Authorization: Bearer REDACTED"
 assert_contains "$secret_result_text" "sk-ant-REDACTED"
 assert_contains "$secret_result_text" "Authorization: Basic REDACTED"
@@ -721,6 +813,16 @@ cancel_job="$(FAKE_ARGS_LOG="$cancel_args" FAKE_BEHAVIOR=slow FAKE_PID_FILE="$ca
 wait_for_file "$cancel_pid_file"
 cancel_fake_pid="$(cat "$cancel_pid_file")"
 wait_for_status "$cancel_work" "$cancel_job" "running-" >/dev/null
+set +e
+"$CC_WATCH" result "$cancel_job" --cwd "$cancel_work" --json > "$TMP_ROOT/running-result.json" 2>&1
+running_result_code="$?"
+set -e
+if [ "$running_result_code" -ne 2 ]; then
+  fail "running result --json should return 2, got $running_result_code"
+fi
+assert_json_file "$TMP_ROOT/running-result.json"
+assert_contains "$(cat "$TMP_ROOT/running-result.json")" '"exit_code" : null'
+assert_contains "$(cat "$TMP_ROOT/running-result.json")" '"result_text" : ""'
 if ! "$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" > "$TMP_ROOT/cancel-status-default.out"; then
   fail "default running status should return zero"
 fi
