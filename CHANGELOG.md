@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.0 - 2026-06-07
+
 - Add foreground `cc-watch --heartbeat SEC` progress lines for long `run` and
   `resume` calls.
 - Add repeatable `--mcp-tool TOOL` so Claude Code can use explicitly allowed
