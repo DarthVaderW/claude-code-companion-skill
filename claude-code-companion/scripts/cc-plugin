@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+set -u
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cc-plugin doctor [options]
+  cc-plugin list [options]
+  cc-plugin versions [options]
+  cc-plugin plan-update [options] --plugin NAME [--plugin NAME ...]
+
+Options:
+  --cwd DIR             Target working directory. Default: current directory.
+  --state-root DIR      Store archives under DIR/.cc-watch instead of <cwd>/.cc-watch.
+  --allow-external-state-root
+                        Allow --state-root outside --cwd.
+  --claude PATH         Claude binary. Default: $CLAUDE_BIN or claude.
+  --plugin NAME         Plugin name for plan-update. May be repeated.
+
+This helper is read-only. It never runs `claude plugin update` or
+`claude plugin marketplace update`.
+EOF
+}
+
+die() {
+  printf 'cc-plugin: %s\n' "$*" >&2
+  exit 1
+}
+
+now_stamp() {
+  date +%Y%m%d%H%M%S
+}
+
+absolute_dir() {
+  local dir="$1"
+  (cd "$dir" 2>/dev/null && pwd) || return 1
+}
+
+absolute_path_for_creation() {
+  local path="$1"
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd)/$path" ;;
+  esac
+  path="${path%/}"
+  [ -n "$path" ] || path="/"
+  if [ -d "$path" ]; then
+    (cd "$path" 2>/dev/null && pwd) || return 1
+    return 0
+  fi
+
+  local parent name parent_abs
+  parent="$(dirname "$path")"
+  name="$(basename "$path")"
+  parent_abs="$(absolute_path_for_creation "$parent")" || return 1
+  printf '%s/%s\n' "$parent_abs" "$name"
+}
+
+redact_stream() {
+  perl -pe '
+    s/((?:Proxy-)?Authorization:[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:]]+/${1}REDACTED/gi;
+    s/((?:x-api-key|api-key):[[:space:]]*)[^[:space:]]+/${1}REDACTED/gi;
+    s/\bsk-ant-[A-Za-z0-9._-]+/sk-ant-REDACTED/g;
+    s/\bsk-(?!ant-)[A-Za-z0-9._-]+/sk-REDACTED/g;
+    s/([?&](?:token|key|api_key|access_token|auth_token)=)[^&[:space:]]+/${1}REDACTED/gi;
+    s/\b((?:ANTHROPIC_[A-Z0-9_]*|CLAUDE_CODE_OAUTH_TOKEN|(?:HTTP|HTTPS|ALL|NO)_PROXY|(?:http|https|all|no)_proxy)=)[^[:space:]]+/${1}REDACTED/g;
+  '
+}
+
+redact_file_in_place() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  local tmp="$path.$$"
+  redact_stream < "$path" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+json_string() {
+  perl -MJSON::PP -CS -e '
+    local $/;
+    my $value = <STDIN>;
+    print JSON::PP->new->ascii(0)->allow_nonref->encode($value);
+  '
+}
+
+resolve_state_root() {
+  local raw="${STATE_ROOT_RAW:-}"
+  if [ -z "$raw" ]; then
+    raw="$CWD/.cc-watch"
+  else
+    case "$(basename "$raw")" in
+      .cc-watch) ;;
+      *) raw="$raw/.cc-watch" ;;
+    esac
+  fi
+
+  STATE_ROOT="$(absolute_path_for_creation "$raw")" || die "cannot resolve state root: $raw"
+  EXTERNAL_STATE_ROOT=0
+  case "$STATE_ROOT/" in
+    "$CWD/"*) ;;
+    *)
+      EXTERNAL_STATE_ROOT=1
+      [ "$ALLOW_EXTERNAL_STATE_ROOT" = "1" ] || die "--state-root outside --cwd requires --allow-external-state-root: $STATE_ROOT"
+      ;;
+  esac
+}
+
+ensure_archive_dir() {
+  mkdir -p "$STATE_ROOT/plugin-admin" || die "cannot create plugin admin archive root: $STATE_ROOT/plugin-admin"
+  if [ ! -f "$STATE_ROOT/.gitignore" ]; then
+    printf '*\n!.gitignore\n' > "$STATE_ROOT/.gitignore"
+  fi
+  ARCHIVE_DIR="$STATE_ROOT/plugin-admin/$(now_stamp)-$$-$COMMAND"
+  mkdir -p "$ARCHIVE_DIR" || die "cannot create plugin admin archive: $ARCHIVE_DIR"
+}
+
+resolve_claude_binary() {
+  if [ -z "$CLAUDE" ]; then
+    return 1
+  fi
+
+  if printf '%s' "$CLAUDE" | grep -q '/'; then
+    [ -x "$CLAUDE" ] || return 1
+    printf '%s\n' "$CLAUDE"
+    return 0
+  fi
+
+  local resolved
+  resolved="$(command -v "$CLAUDE" 2>/dev/null || true)"
+  if [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  if [ "$CLAUDE" = "claude" ] && [ -x "$HOME/.local/bin/claude" ]; then
+    printf '%s\n' "$HOME/.local/bin/claude"
+    return 0
+  fi
+
+  return 1
+}
+
+validate_plugin_name() {
+  local name="$1"
+  [ -n "$name" ] || die "--plugin requires a non-empty value"
+  case "$name" in
+    */*|*'\'*|*..*|*';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'('*|*')'*|*'<'*|*'>'*)
+      die "unsafe plugin name: $name"
+      ;;
+    *'
+'*) die "unsafe plugin name: $name" ;;
+  esac
+  if printf '%s' "$name" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "unsafe plugin name: $name"
+  fi
+}
+
+plugins_json() {
+  if [ "${#PLUGINS[@]}" -eq 0 ]; then
+    printf '[]'
+    return 0
+  fi
+  printf '%s\n' "${PLUGINS[@]}" | perl -MJSON::PP -CS -e '
+    my @v = map { chomp; $_ } <STDIN>;
+    print JSON::PP->new->ascii(0)->encode(\@v);
+  '
+}
+
+parse_options() {
+  CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
+  CLAUDE="${CLAUDE_BIN:-claude}"
+  PLUGINS=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
+        ;;
+      --claude)
+        [ "$#" -ge 2 ] || die "--claude requires a value"
+        CLAUDE="$2"
+        shift 2
+        ;;
+      --plugin)
+        [ "$#" -ge 2 ] || die "--plugin requires a value"
+        validate_plugin_name "$2"
+        PLUGINS+=("$2")
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
+}
+
+write_metadata() {
+  local exit_code="$1"
+  local claude_version="$2"
+  local tmp="$ARCHIVE_DIR/metadata.json.$$"
+  {
+    printf '{\n'
+    printf '  "command": %s,\n' "$(printf '%s' "$COMMAND" | json_string)"
+    printf '  "exit_code": %s,\n' "$exit_code"
+    printf '  "cwd": %s,\n' "$(printf '%s' "$CWD" | json_string)"
+    printf '  "state_root": %s,\n' "$(printf '%s' "$STATE_ROOT" | json_string)"
+    printf '  "external_state": %s,\n' "$(printf '%s' "$EXTERNAL_STATE_ROOT" | json_string)"
+    printf '  "claude": %s,\n' "$(printf '%s' "$CLAUDE" | json_string)"
+    printf '  "claude_version": %s,\n' "$(printf '%s' "$claude_version" | json_string)"
+    printf '  "plugins": %s\n' "$(plugins_json)"
+    printf '}\n'
+  } | redact_stream > "$tmp"
+  mv "$tmp" "$ARCHIVE_DIR/metadata.json"
+}
+
+run_claude_plugin() {
+  local stdout_file="$1"
+  local stderr_file="$2"
+  shift 2
+  (
+    cd "$CWD" || exit 97
+    "$CLAUDE" plugin "$@" > "$stdout_file" 2> "$stderr_file"
+  )
+}
+
+archive_and_print() {
+  local exit_code="$1"
+  local title="$2"
+  local stdout_file="$ARCHIVE_DIR/stdout.txt"
+  local stderr_file="$ARCHIVE_DIR/stderr.log"
+  local claude_version
+  claude_version="$("$CLAUDE" --version 2>/dev/null || true)"
+  redact_file_in_place "$stdout_file"
+  redact_file_in_place "$stderr_file"
+  write_metadata "$exit_code" "$claude_version"
+
+  {
+    printf '# cc-plugin %s\n\n' "$COMMAND"
+    printf '%s\n' "- status: \`$([ "$exit_code" -eq 0 ] && printf ok || printf failed)\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- cwd: \`$CWD\`"
+    printf '%s\n' "- state_root: \`$STATE_ROOT\`"
+    printf '%s\n' "- archive: \`$ARCHIVE_DIR\`"
+    [ -n "$title" ] && printf '%s\n' "- note: $title"
+    printf '\n## Output\n\n'
+    if [ -s "$stdout_file" ]; then
+      cat "$stdout_file"
+    else
+      printf '(No stdout.)\n'
+    fi
+    if [ -s "$stderr_file" ]; then
+      printf '\n## stderr\n\n```text\n'
+      cat "$stderr_file"
+      printf '\n```\n'
+    fi
+  } | redact_stream | tee "$ARCHIVE_DIR/result.txt"
+  cp "$stdout_file" "$ARCHIVE_DIR/before.txt"
+  : > "$ARCHIVE_DIR/after.txt"
+  return "$exit_code"
+}
+
+cmd_doctor() {
+  parse_options "$@"
+  ensure_archive_dir
+  printf 'cc-plugin %s\n' "$COMMAND" > "$ARCHIVE_DIR/command.txt"
+
+  local stdout_file="$ARCHIVE_DIR/stdout.txt"
+  local stderr_file="$ARCHIVE_DIR/stderr.log"
+  local resolved
+  {
+    printf 'cwd=%s\n' "$CWD"
+    printf 'state_root=%s\n' "$STATE_ROOT"
+    printf 'state_external=%s\n' "$EXTERNAL_STATE_ROOT"
+    if resolved="$(resolve_claude_binary)"; then
+      CLAUDE="$resolved"
+      printf 'claude_path=%s\n' "$CLAUDE"
+      printf 'claude_version=%s\n' "$("$CLAUDE" --version 2>/dev/null || true)"
+      if "$CLAUDE" plugin --help >/dev/null 2> "$stderr_file"; then
+        printf 'plugin_command=yes\n'
+      else
+        printf 'plugin_command=no\n'
+      fi
+    else
+      printf 'claude_path=missing\n'
+      printf 'claude_version=unknown\n'
+      printf 'plugin_command=no\n'
+    fi
+  } > "$stdout_file"
+  : "${resolved:=}"
+  archive_and_print 0 "read-only doctor; no plugin state changed"
+}
+
+cmd_list() {
+  parse_options "$@"
+  ensure_archive_dir
+  printf 'cc-plugin list\n' > "$ARCHIVE_DIR/command.txt"
+
+  local stdout_file="$ARCHIVE_DIR/stdout.txt"
+  local stderr_file="$ARCHIVE_DIR/stderr.log"
+  CLAUDE="$(resolve_claude_binary)" || die "Claude binary not found or not executable: $CLAUDE"
+  run_claude_plugin "$stdout_file" "$stderr_file" list
+  archive_and_print "$?" "read-only plugin list"
+}
+
+cmd_versions() {
+  parse_options "$@"
+  ensure_archive_dir
+  printf 'cc-plugin versions\n' > "$ARCHIVE_DIR/command.txt"
+
+  local stdout_file="$ARCHIVE_DIR/stdout.txt"
+  local stderr_file="$ARCHIVE_DIR/stderr.log"
+  local fallback_stdout="$ARCHIVE_DIR/stdout.fallback"
+  local fallback_stderr="$ARCHIVE_DIR/stderr.fallback"
+  local code
+  CLAUDE="$(resolve_claude_binary)" || die "Claude binary not found or not executable: $CLAUDE"
+  run_claude_plugin "$stdout_file" "$stderr_file" versions
+  code="$?"
+  if [ "$code" -ne 0 ] && grep -qi "unknown command.*versions" "$stderr_file"; then
+    {
+      printf 'versions_command=unavailable\n'
+      printf 'latest_versions=unavailable_without_supported_cli_command\n'
+      printf '\n# Installed plugin versions from `claude plugin list`\n'
+    } > "$fallback_stdout"
+    run_claude_plugin "$ARCHIVE_DIR/list.stdout" "$fallback_stderr" list || true
+    cat "$ARCHIVE_DIR/list.stdout" >> "$fallback_stdout"
+    {
+      printf 'claude plugin versions is unavailable in this Claude CLI; fell back to read-only plugin list.\n'
+      cat "$stderr_file"
+      cat "$fallback_stderr"
+    } > "$ARCHIVE_DIR/stderr.combined"
+    mv "$fallback_stdout" "$stdout_file"
+    mv "$ARCHIVE_DIR/stderr.combined" "$stderr_file"
+    code=0
+  fi
+  archive_and_print "$code" "read-only plugin versions"
+}
+
+cmd_plan_update() {
+  parse_options "$@"
+  [ "${#PLUGINS[@]}" -gt 0 ] || die "plan-update requires at least one --plugin"
+  ensure_archive_dir
+  printf 'cc-plugin plan-update' > "$ARCHIVE_DIR/command.txt"
+  printf ' --plugin %q' "${PLUGINS[@]}" >> "$ARCHIVE_DIR/command.txt"
+  printf '\n' >> "$ARCHIVE_DIR/command.txt"
+
+  local stdout_file="$ARCHIVE_DIR/stdout.txt"
+  local stderr_file="$ARCHIVE_DIR/stderr.log"
+  CLAUDE="$(resolve_claude_binary)" || die "Claude binary not found or not executable: $CLAUDE"
+  {
+    printf 'dry_run=yes\n'
+    printf 'mutates_global_state=no\n'
+    printf 'would_run=claude plugin marketplace update\n'
+    local plugin
+    for plugin in "${PLUGINS[@]}"; do
+      printf 'would_run=claude plugin update %s\n' "$plugin"
+    done
+    printf '\n# Current plugin list\n'
+    "$CLAUDE" plugin list 2> "$stderr_file" || true
+  } > "$stdout_file"
+  archive_and_print 0 "read-only dry-run; no marketplace refresh or plugin update was executed"
+}
+
+main() {
+  [ "$#" -gt 0 ] || {
+    usage
+    exit 2
+  }
+  COMMAND="$1"
+  shift
+
+  case "$COMMAND" in
+    doctor) cmd_doctor "$@" ;;
+    list) cmd_list "$@" ;;
+    versions) cmd_versions "$@" ;;
+    plan-update) cmd_plan_update "$@" ;;
+    -h|--help) usage ;;
+    *) die "unknown command: $COMMAND" ;;
+  esac
+}
+
+main "$@"

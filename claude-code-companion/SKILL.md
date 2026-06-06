@@ -101,6 +101,15 @@ scripts/cc-watch show --cwd . --last
 scripts/cc-watch show --cwd . repo-review --transcript
 ```
 
+To keep archives outside the target repo, pass the same state root to every
+command that should read or write that job. If the state root is outside
+`--cwd`, repeat `--allow-external-state-root` on read commands too:
+
+```bash
+scripts/cc-watch run --cwd . --state-root /path/to/reviews --allow-external-state-root -- "Review this repo."
+scripts/cc-watch result <job-id> --cwd . --state-root /path/to/reviews --allow-external-state-root
+```
+
 When running inside Codex tool calls, prefer foreground `run` unless the shell
 will remain alive; some command runners clean background children when the tool
 call exits. Use `status` while waiting. `running-quiet` means Claude is still
@@ -110,11 +119,28 @@ alive but has not emitted stream-json recently; do not treat it as failure. Use
 Every terminal job writes `.cc-watch/<job-id>/result.txt`, `transcript.md`,
 `metadata.json`, `metadata.md`, `prompt.md`, `stdout.jsonl`, and `stderr.log`.
 Treat `result.txt` as the human-readable archive entry, `transcript.md` as the
-prompt-plus-answer view for future reading, and `stdout.jsonl` as the lossless
-raw evidence. `result` prints `result.txt` for any terminal job and exits
+prompt-plus-answer view for future reading, and `stdout.jsonl` as the local
+lossless raw evidence. Human-readable outputs are best-effort redacted for
+secret-shaped strings; do not rely on redaction as a reason to enable MCP or
+print environment values. `result` prints `result.txt` for any terminal job and exits
 non-zero for failed, timed-out, or canceled jobs. `status` returns zero for
 running jobs by default; use `--strict-exit` only when a script needs
 polling-style non-zero exits.
+
+For Claude Code plugin inspection, use the read-only sibling helper:
+
+```bash
+scripts/cc-plugin doctor --cwd .
+scripts/cc-plugin list --cwd .
+scripts/cc-plugin versions --cwd .
+scripts/cc-plugin plan-update --cwd . --plugin siyuan-mcp
+```
+
+`cc-plugin` does not update marketplace metadata or plugins. Treat any command
+that would run `claude plugin marketplace update` or `claude plugin update` as a
+separate global-state mutation requiring explicit user approval.
+If `claude plugin versions` is unavailable, `cc-plugin versions` falls back to
+the installed-version view from `claude plugin list`.
 
 ## Prompt Shape
 

@@ -10,6 +10,7 @@ claude-code-companion/
   SKILL.md
   scripts/
     cc-watch
+    cc-plugin
 ```
 
 It is not a Codex plugin, MCP server, Python package, or uvx tool. It does not
@@ -66,7 +67,8 @@ claude-code-companion/scripts/cc-watch show --cwd . --last
 claude-code-companion/scripts/cc-watch show --cwd . repo-review --transcript
 ```
 
-Runtime state for async jobs is written only under the target working directory:
+Runtime state for async jobs is written under the target working directory by
+default:
 
 ```text
 .cc-watch/
@@ -98,6 +100,18 @@ The state directory writes its own `.gitignore` and this repo ignores
 `.cc-watch/`, so prompts and raw stream logs should not be committed by
 accident.
 
+To keep archives outside the target project, pass a state root explicitly:
+
+```bash
+claude-code-companion/scripts/cc-watch run --cwd . --state-root /path/to/reviews --allow-external-state-root -- "Review this repo."
+```
+
+Custom state roots are nested under `DIR/.cc-watch/` so the helper does not
+write a catch-all `.gitignore` into a user-owned parent directory. Commands
+that read existing jobs, such as `status`, `result`, `list`, `show`, and
+`resume`, need the same `--state-root` value. If that state root is outside
+`--cwd`, those read commands must also repeat `--allow-external-state-root`.
+
 ## Security Model
 
 `cc-watch` treats Claude Code as a read-only reviewer by default:
@@ -107,6 +121,10 @@ accident.
 - Session persistence is disabled by default with `--no-session-persistence`.
 - Raw `stream-json` is saved locally; `result.txt` is the human-readable
   archive view.
+- Human-readable outputs are best-effort redacted for secret-shaped strings
+  such as bearer tokens, `sk-*` keys, token query parameters, and common
+  Claude/proxy environment values. `stdout.jsonl` remains the local lossless
+  evidence file.
 
 Use explicit opt-ins only when needed:
 
@@ -164,6 +182,27 @@ Restart Codex after installing or updating skills.
 
 This project is not a `uvx` tool. Do not add `pyproject.toml` or a Python
 package only to install this skill.
+
+## Claude Plugin Read-Only Checks
+
+`cc-plugin` is a sibling helper for inspecting Claude Code plugin state without
+mutating global plugin installs:
+
+```bash
+claude-code-companion/scripts/cc-plugin doctor --cwd .
+claude-code-companion/scripts/cc-plugin list --cwd .
+claude-code-companion/scripts/cc-plugin versions --cwd .
+claude-code-companion/scripts/cc-plugin plan-update --cwd . --plugin siyuan-mcp --plugin zotero-mcp
+```
+
+`plan-update` is a dry run. It prints the commands a human could run later, but
+it does not execute `claude plugin marketplace update` or `claude plugin
+update`. Any future helper that mutates `~/.claude` must be explicit, opt-in,
+and documented separately from the read-only reviewer path.
+
+On Claude CLI builds that do not provide `claude plugin versions`, `versions`
+falls back to `claude plugin list` and reports that latest-version detection is
+unavailable without a supported CLI command.
 
 ## Requirements
 

@@ -51,6 +51,15 @@ case "${FAKE_BEHAVIOR:-success}" in
     printf 'fake failure\n' >&2
     exit 42
     ;;
+  secret-success)
+    printf 'stderr Authorization: Bearer STDERRSECRET Proxy-Authorization: Basic PROXYSECRET sk-ant-stderrsecret ANTHROPIC_API_KEY=stderr-secret http_proxy=http://user:pass@proxy\n' >&2
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"Authorization: Bearer SECRET123 Authorization: Basic BASICSECRET x-api-key: HEADERSECRET sk-ant-secretvalue https://example.test/?token=tokensecret ANTHROPIC_API_KEY=envsecret"}'
+    ;;
+  secret-fail)
+    printf 'fake failure Authorization: Bearer FAILSECRET Proxy-Authorization: Basic FAILBASIC x-api-key: FAILHEADER sk-ant-failsecret https://example.test/?api_key=failkey HTTP_PROXY=http://proxy-secret https_proxy=http://lower-proxy-secret\n' >&2
+    exit 42
+    ;;
   slow)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
     sleep 30
@@ -134,6 +143,18 @@ job_dir_for_work() {
   printf '%s/.cc-watch/%s\n' "$work" "$job"
 }
 
+job_id_for_state_parent() {
+  local parent="$1"
+  cat "$parent/.cc-watch"/*/job_id
+}
+
+job_dir_for_state_parent() {
+  local parent="$1"
+  local job
+  job="$(job_id_for_state_parent "$parent")"
+  printf '%s/.cc-watch/%s\n' "$parent" "$job"
+}
+
 new_workdir() {
   local dir="$TMP_ROOT/work-$1"
   mkdir -p "$dir"
@@ -154,6 +175,8 @@ run_success_with_behavior() {
   assert_contains "$(cat "$(job_dir_for_work "$work")/result.txt")" "# cc-watch result"
   assert_contains "$(cat "$(job_dir_for_work "$work")/transcript.md")" "# cc-watch transcript"
   assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.json")" '"status": "finished"'
+  assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.json")" '"state_root":'
+  assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.json")" '"external_state": "0"'
   assert_json_file "$(job_dir_for_work "$work")/metadata.json"
   assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.md")" "# cc-watch metadata"
   [ -f "$work/.cc-watch/.gitignore" ] || fail "missing state .gitignore"
@@ -358,6 +381,56 @@ if "$CC_WATCH" status "$fail_job" --cwd "$fail_work" > "$TMP_ROOT/fail-status-de
   fail "default failed status should return non-zero"
 fi
 
+secret_work="$(new_workdir secret-success)"
+secret_args="$TMP_ROOT/secret-success.args"
+FAKE_ARGS_LOG="$secret_args" FAKE_BEHAVIOR=secret-success \
+  "$CC_WATCH" run --cwd "$secret_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/secret-run.out"
+secret_dir="$(job_dir_for_work "$secret_work")"
+secret_job="$(job_id_for_work "$secret_work")"
+secret_run_text="$(cat "$TMP_ROOT/secret-run.out")"
+secret_result_text="$(cat "$secret_dir/result.txt")"
+secret_transcript_text="$(cat "$secret_dir/transcript.md")"
+secret_show_raw="$("$CC_WATCH" show --cwd "$secret_work" "$secret_job" --raw)"
+assert_contains "$secret_run_text" "Authorization: Bearer REDACTED"
+assert_contains "$secret_result_text" "sk-ant-REDACTED"
+assert_contains "$secret_result_text" "Authorization: Basic REDACTED"
+assert_contains "$secret_result_text" "x-api-key: REDACTED"
+assert_contains "$secret_result_text" "token=REDACTED"
+assert_contains "$secret_transcript_text" "ANTHROPIC_API_KEY=REDACTED"
+assert_contains "$secret_transcript_text" "http_proxy=REDACTED"
+assert_contains "$secret_show_raw" "Authorization: Bearer REDACTED"
+assert_not_contains "$secret_run_text" "SECRET123"
+assert_not_contains "$secret_result_text" "BASICSECRET"
+assert_not_contains "$secret_result_text" "HEADERSECRET"
+assert_not_contains "$secret_result_text" "secretvalue"
+assert_not_contains "$secret_transcript_text" "envsecret"
+assert_not_contains "$secret_transcript_text" "user:pass"
+assert_not_contains "$secret_show_raw" "SECRET123"
+assert_contains "$(cat "$secret_dir/stdout.jsonl")" "SECRET123"
+
+secret_fail_work="$(new_workdir secret-fail)"
+secret_fail_args="$TMP_ROOT/secret-fail.args"
+set +e
+FAKE_ARGS_LOG="$secret_fail_args" FAKE_BEHAVIOR=secret-fail \
+  "$CC_WATCH" run --cwd "$secret_fail_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/secret-fail-run.out" 2>&1
+secret_fail_code="$?"
+set -e
+if [ "$secret_fail_code" -eq 0 ]; then
+  fail "secret-fail run should fail"
+fi
+secret_fail_text="$(cat "$TMP_ROOT/secret-fail-run.out")"
+assert_contains "$secret_fail_text" "Authorization: Bearer REDACTED"
+assert_contains "$secret_fail_text" "Proxy-Authorization: Basic REDACTED"
+assert_contains "$secret_fail_text" "x-api-key: REDACTED"
+assert_contains "$secret_fail_text" "sk-ant-REDACTED"
+assert_contains "$secret_fail_text" "api_key=REDACTED"
+assert_contains "$secret_fail_text" "HTTP_PROXY=REDACTED"
+assert_contains "$secret_fail_text" "https_proxy=REDACTED"
+assert_not_contains "$secret_fail_text" "FAILSECRET"
+assert_not_contains "$secret_fail_text" "failsecret"
+assert_not_contains "$secret_fail_text" "failkey"
+assert_not_contains "$secret_fail_text" "lower-proxy-secret"
+
 doctor_work="$(new_workdir doctor)"
 doctor_out="$TMP_ROOT/doctor.out"
 doctor_args="$TMP_ROOT/doctor.args"
@@ -388,6 +461,50 @@ assert_contains "$async_result" "fake final review"
 empty_list_work="$(new_workdir empty-list)"
 empty_list="$("$CC_WATCH" list --cwd "$empty_list_work")"
 [ -z "$empty_list" ] || fail "empty list should print nothing"
+
+state_work="$(new_workdir state-root)"
+state_parent="$state_work/custom-state"
+state_args="$TMP_ROOT/state-root.args"
+FAKE_ARGS_LOG="$state_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$state_work" --state-root "$state_parent" --claude "$FAKE_CLAUDE" \
+  --title "state root test" -- "review only" > "$TMP_ROOT/state-root.out"
+[ ! -d "$state_work/.cc-watch" ] || fail "custom state root should not write default .cc-watch"
+[ -d "$state_parent/.cc-watch" ] || fail "custom state root did not create nested .cc-watch"
+[ -f "$state_parent/.cc-watch/.gitignore" ] || fail "custom state root missing nested .gitignore"
+[ ! -f "$state_parent/.gitignore" ] || fail "custom state root wrote gitignore to user parent dir"
+state_job="$(job_id_for_state_parent "$state_parent")"
+state_dir="$(job_dir_for_state_parent "$state_parent")"
+state_status="$("$CC_WATCH" status "$state_job" --cwd "$state_work" --state-root "$state_parent")"
+assert_contains "$state_status" "finished"
+assert_not_contains "$state_status" "state_warning"
+state_result="$("$CC_WATCH" result "$state_job" --cwd "$state_work" --state-root "$state_parent")"
+assert_contains "$state_result" "fake final review"
+state_list="$("$CC_WATCH" list --cwd "$state_work" --state-root "$state_parent")"
+assert_contains "$state_list" "title=state root test"
+state_show="$("$CC_WATCH" show --cwd "$state_work" --state-root "$state_parent" --last)"
+assert_contains "$state_show" "fake final review"
+assert_contains "$(cat "$state_dir/metadata.json")" "\"state_root\": \"$state_parent/.cc-watch\""
+assert_contains "$(cat "$state_dir/metadata.json")" '"external_state": "0"'
+
+external_state_work="$(new_workdir external-state)"
+external_parent="$TMP_ROOT/outside-state"
+if FAKE_ARGS_LOG="$TMP_ROOT/external-denied.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$external_state_work" --state-root "$external_parent" \
+  --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
+  fail "external state root without allow flag should fail"
+fi
+[ ! -e "$external_parent" ] || fail "denied external state root should not be created"
+FAKE_ARGS_LOG="$TMP_ROOT/external-allowed.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$external_state_work" --state-root "$external_parent" \
+  --allow-external-state-root --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/external-allowed.out"
+external_job="$(job_id_for_state_parent "$external_parent")"
+external_dir="$(job_dir_for_state_parent "$external_parent")"
+external_result="$("$CC_WATCH" result "$external_job" --cwd "$external_state_work" --state-root "$external_parent" --allow-external-state-root)"
+assert_contains "$external_result" "fake final review"
+assert_contains "$(cat "$external_dir/metadata.json")" '"external_state": "1"'
+external_doctor="$("$CC_WATCH" doctor --cwd "$external_state_work" --state-root "$external_parent" --allow-external-state-root --claude "$FAKE_CLAUDE")"
+assert_contains "$external_doctor" "state_external=1"
+assert_contains "$external_doctor" "state_warning=external-state-root"
 
 list_text="$("$CC_WATCH" list --cwd "$async_work")"
 assert_contains "$list_text" "job=$async_job"

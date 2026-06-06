@@ -11,16 +11,19 @@ usage() {
 Usage:
   cc-watch run [options] -- PROMPT
   cc-watch start [options] -- PROMPT
-  cc-watch status <job-id> [--cwd DIR] [--strict-exit]
-  cc-watch result <job-id> [--cwd DIR]
-  cc-watch list [--cwd DIR]
-  cc-watch show [--cwd DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
+  cc-watch status <job-id> [--cwd DIR] [--state-root DIR] [--strict-exit]
+  cc-watch result <job-id> [--cwd DIR] [--state-root DIR]
+  cc-watch list [--cwd DIR] [--state-root DIR]
+  cc-watch show [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
   cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
-  cc-watch cancel <job-id> [--cwd DIR]
+  cc-watch cancel <job-id> [--cwd DIR] [--state-root DIR]
   cc-watch doctor [options]
 
 Options:
   --cwd DIR             Target working directory. Default: current directory.
+  --state-root DIR      Store/read archives from DIR/.cc-watch instead of <cwd>/.cc-watch.
+  --allow-external-state-root
+                        Allow --state-root outside --cwd.
   --title TITLE         Human-readable local job title. Not passed to Claude.
   --effort LEVEL        Claude effort level. Default: max.
   --model MODEL         Optional Claude model.
@@ -58,6 +61,27 @@ absolute_dir() {
   (cd "$dir" 2>/dev/null && pwd) || return 1
 }
 
+absolute_path_for_creation() {
+  local path="$1"
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd)/$path" ;;
+  esac
+  path="${path%/}"
+  [ -n "$path" ] || path="/"
+  if [ -d "$path" ]; then
+    (cd "$path" 2>/dev/null && pwd) || return 1
+    return 0
+  fi
+
+  local parent name parent_abs
+  parent="$(dirname "$path")"
+  name="$(basename "$path")"
+  parent_abs="$(absolute_path_for_creation "$parent")" || return 1
+  printf '%s/%s\n' "$parent_abs" "$name"
+}
+
 script_path() {
   local src="${BASH_SOURCE[0]}"
   local dir
@@ -70,6 +94,29 @@ state_root_for() {
   printf '%s/.cc-watch\n' "$cwd"
 }
 
+resolve_state_root() {
+  local raw="${STATE_ROOT_RAW:-}"
+  local external_allowed="${ALLOW_EXTERNAL_STATE_ROOT:-0}"
+  if [ -z "$raw" ]; then
+    raw="$(state_root_for "$CWD")"
+  else
+    case "$(basename "$raw")" in
+      .cc-watch) ;;
+      *) raw="$raw/.cc-watch" ;;
+    esac
+  fi
+
+  STATE_ROOT="$(absolute_path_for_creation "$raw")" || die "cannot resolve state root: $raw"
+  EXTERNAL_STATE_ROOT=0
+  case "$STATE_ROOT/" in
+    "$CWD/"*) ;;
+    *)
+      EXTERNAL_STATE_ROOT=1
+      [ "$external_allowed" = "1" ] || die "--state-root outside --cwd requires --allow-external-state-root: $STATE_ROOT"
+      ;;
+  esac
+}
+
 ensure_state_root() {
   local root="$1"
   mkdir -p "$root" || die "cannot create state root: $root"
@@ -79,9 +126,9 @@ ensure_state_root() {
 }
 
 job_dir_for() {
-  local cwd="$1"
+  local root="$1"
   local job_id="$2"
-  printf '%s/%s\n' "$(state_root_for "$cwd")" "$job_id"
+  printf '%s/%s\n' "$root" "$job_id"
 }
 
 new_job_id() {
@@ -99,6 +146,17 @@ read_file() {
   if [ -f "$path" ]; then
     cat "$path"
   fi
+}
+
+redact_stream() {
+  perl -pe '
+    s/((?:Proxy-)?Authorization:[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:]]+/${1}REDACTED/gi;
+    s/((?:x-api-key|api-key):[[:space:]]*)[^[:space:]]+/${1}REDACTED/gi;
+    s/\bsk-ant-[A-Za-z0-9._-]+/sk-ant-REDACTED/g;
+    s/\bsk-(?!ant-)[A-Za-z0-9._-]+/sk-REDACTED/g;
+    s/([?&](?:token|key|api_key|access_token|auth_token)=)[^&[:space:]]+/${1}REDACTED/gi;
+    s/\b((?:ANTHROPIC_[A-Z0-9_]*|CLAUDE_CODE_OAUTH_TOKEN|(?:HTTP|HTTPS|ALL|NO)_PROXY|(?:http|https|all|no)_proxy)=)[^[:space:]]+/${1}REDACTED/g;
+  '
 }
 
 json_string() {
@@ -135,6 +193,15 @@ validate_title() {
   if printf '%s' "$title" | LC_ALL=C grep -q '[[:cntrl:]]'; then
     die "--title cannot contain control characters"
   fi
+}
+
+target_repo_summary() {
+  local repo head
+  repo="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$repo" ] || return 0
+  head="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
+  [ -n "$head" ] || head="unknown"
+  printf '%s@%s\n' "$repo" "$head"
 }
 
 resolve_claude_binary() {
@@ -212,6 +279,8 @@ parse_prompt() {
 
 parse_run_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
   TITLE=""
   EFFORT="$EFFORT_DEFAULT"
   MODEL=""
@@ -234,6 +303,15 @@ parse_run_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       --title)
         [ "$#" -ge 2 ] || die "--title requires a value"
@@ -326,10 +404,13 @@ parse_run_options() {
   fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
 }
 
 parse_job_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
   JOB_ID=""
   STRICT_EXIT=0
 
@@ -343,6 +424,15 @@ parse_job_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       --strict-exit)
         STRICT_EXIT=1
@@ -359,11 +449,14 @@ parse_job_options() {
   done
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
-  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+  resolve_state_root
+  JOB_DIR="$(job_dir_for "$STATE_ROOT" "$JOB_ID")"
 }
 
 parse_doctor_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
   CLAUDE="${CLAUDE_BIN:-claude}"
 
   while [ "$#" -gt 0 ]; do
@@ -372,6 +465,15 @@ parse_doctor_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       --claude)
         [ "$#" -ge 2 ] || die "--claude requires a value"
@@ -389,12 +491,15 @@ parse_doctor_options() {
   done
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
 }
 
 write_config() {
-  ensure_state_root "$(state_root_for "$CWD")"
+  ensure_state_root "$STATE_ROOT"
   mkdir -p "$JOB_DIR" || die "cannot create job dir: $JOB_DIR"
   write_file "$JOB_DIR/job_id" "$JOB_ID"
+  write_file "$JOB_DIR/state_root" "$STATE_ROOT"
+  write_file "$JOB_DIR/external_state_root" "$EXTERNAL_STATE_ROOT"
   write_file "$JOB_DIR/title" "$TITLE"
   write_file "$JOB_DIR/cwd" "$CWD"
   write_file "$JOB_DIR/claude" "$CLAUDE"
@@ -424,8 +529,12 @@ write_config() {
 
 load_config() {
   JOB_ID="$(read_file "$JOB_DIR/job_id")"
+  STATE_ROOT="$(read_file "$JOB_DIR/state_root")"
+  EXTERNAL_STATE_ROOT="$(read_file "$JOB_DIR/external_state_root")"
   TITLE="$(read_file "$JOB_DIR/title")"
   CWD="$(read_file "$JOB_DIR/cwd")"
+  [ -n "$STATE_ROOT" ] || STATE_ROOT="$(state_root_for "$CWD")"
+  [ -n "$EXTERNAL_STATE_ROOT" ] || EXTERNAL_STATE_ROOT=0
   CLAUDE="$(read_file "$JOB_DIR/claude")"
   EFFORT="$(read_file "$JOB_DIR/effort")"
   MODEL="$(read_file "$JOB_DIR/model")"
@@ -553,12 +662,12 @@ render_transcript() {
 write_transcript_file() {
   local reason="$1"
   local tmp_transcript="$JOB_DIR/transcript.md.$$"
-  render_transcript "$reason" > "$tmp_transcript"
+  render_transcript "$reason" | redact_stream > "$tmp_transcript"
   mv "$tmp_transcript" "$JOB_DIR/transcript.md"
 }
 
 write_metadata_files() {
-  local status exit_code started_at finished_at elapsed session session_resumable title resumed_from
+  local status exit_code started_at finished_at elapsed session session_resumable title resumed_from target_repo
   status="$(read_file "$JOB_DIR/status")"
   exit_code="$(status_exit_code)"
   started_at="$(read_file "$JOB_DIR/started_at")"
@@ -567,6 +676,7 @@ write_metadata_files() {
   session="$(read_file "$JOB_DIR/session_id")"
   title="$(read_file "$JOB_DIR/title")"
   resumed_from="$(read_file "$JOB_DIR/resumed_from")"
+  target_repo="$(target_repo_summary)"
   session_resumable=no
   if [ -n "$session" ] && [ "$(read_file "$JOB_DIR/no_session_persistence")" != "1" ]; then
     session_resumable=yes
@@ -580,6 +690,9 @@ write_metadata_files() {
     printf '  "status": %s,\n' "$(printf '%s' "$status" | json_string)"
     printf '  "exit_code": %s,\n' "$exit_code"
     printf '  "cwd": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/cwd")" | json_string)"
+    printf '  "state_root": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/state_root")" | json_string)"
+    printf '  "external_state": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/external_state_root")" | json_string)"
+    printf '  "target_repo": %s,\n' "$(printf '%s' "$target_repo" | json_string)"
     printf '  "claude": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/claude")" | json_string)"
     printf '  "model": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/model")" | json_string)"
     printf '  "effort": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/effort")" | json_string)"
@@ -594,7 +707,7 @@ write_metadata_files() {
     printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
     printf '  "prompt_file": %s\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
     printf '}\n'
-  } > "$tmp_json"
+  } | redact_stream > "$tmp_json"
   mv "$tmp_json" "$JOB_DIR/metadata.json"
 
   local tmp_md="$JOB_DIR/metadata.md.$$"
@@ -608,6 +721,9 @@ write_metadata_files() {
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
     printf '%s\n' "- cwd: \`$(read_file "$JOB_DIR/cwd")\`"
+    printf '%s\n' "- state_root: \`$(read_file "$JOB_DIR/state_root")\`"
+    printf '%s\n' "- external_state: \`$(read_file "$JOB_DIR/external_state_root")\`"
+    [ -n "$target_repo" ] && printf '%s\n' "- target_repo: \`$target_repo\`"
     printf '%s\n' "- model: \`$(read_file "$JOB_DIR/model")\`"
     printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
     if [ -n "$session" ]; then
@@ -617,7 +733,7 @@ write_metadata_files() {
     if [ -n "$resumed_from" ]; then
       printf '%s\n' "- resumed_from: \`$resumed_from\`"
     fi
-  } > "$tmp_md"
+  } | redact_stream > "$tmp_md"
   mv "$tmp_md" "$JOB_DIR/metadata.md"
 }
 
@@ -680,7 +796,7 @@ write_result_archive() {
         printf '\n```\n'
       fi
     fi
-  } > "$tmp_result"
+  } | redact_stream > "$tmp_result"
   mv "$tmp_result" "$JOB_DIR/result.txt"
   write_transcript_file "$reason"
 }
@@ -1011,6 +1127,8 @@ render_status() {
 
 parse_list_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1018,6 +1136,15 @@ parse_list_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       -h|--help)
         usage
@@ -1030,6 +1157,7 @@ parse_list_options() {
   done
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
 }
 
 job_started_at_or_zero() {
@@ -1043,7 +1171,7 @@ job_started_at_or_zero() {
 
 latest_job_dir() {
   local root latest_dir="" latest_started="-1" latest_job="" dir started job
-  root="$(state_root_for "$CWD")"
+  root="$STATE_ROOT"
   for dir in "$root"/*/; do
     [ -f "$dir/job_id" ] || continue
     started="$(job_started_at_or_zero "$dir")"
@@ -1061,7 +1189,7 @@ latest_job_dir() {
 find_job_dir_by_title() {
   local title="$1"
   local root latest_dir="" latest_started="-1" latest_job="" dir started job job_title
-  root="$(state_root_for "$CWD")"
+  root="$STATE_ROOT"
   for dir in "$root"/*/; do
     [ -f "$dir/job_id" ] || continue
     job_title="$(read_file "$dir/title")"
@@ -1088,7 +1216,7 @@ looks_like_session_id() {
 resolve_job_selector() {
   local selector="$1"
   local root direct
-  root="$(state_root_for "$CWD")"
+  root="$STATE_ROOT"
   if [ -z "$selector" ]; then
     latest_job_dir
     return
@@ -1113,7 +1241,7 @@ cmd_list() {
   parse_list_options "$@"
 
   local root dir job title session no_session_persistence session_resumable status elapsed started
-  root="$(state_root_for "$CWD")"
+  root="$STATE_ROOT"
   [ -d "$root" ] || return 0
 
   for dir in "$root"/*/; do
@@ -1140,6 +1268,8 @@ cmd_list() {
 
 parse_show_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
   SHOW_SELECTOR=""
   SHOW_LAST=0
   SHOW_VIEW="result"
@@ -1150,6 +1280,15 @@ parse_show_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       --last)
         [ -z "$SHOW_SELECTOR" ] || die "--last cannot be combined with a selector"
@@ -1185,13 +1324,14 @@ parse_show_options() {
   done
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
 }
 
 cmd_show() {
   parse_show_options "$@"
 
   if [ "$SHOW_LAST" = "1" ] || [ -z "$SHOW_SELECTOR" ]; then
-    JOB_DIR="$(latest_job_dir)" || die "no cc-watch jobs in: $(state_root_for "$CWD")"
+    JOB_DIR="$(latest_job_dir)" || die "no cc-watch jobs in: $STATE_ROOT"
   else
     JOB_DIR="$(resolve_job_selector "$SHOW_SELECTOR")" || die "unknown job or title: $SHOW_SELECTOR"
   fi
@@ -1200,7 +1340,7 @@ cmd_show() {
   case "$SHOW_VIEW" in
     result)
       if [ -s "$JOB_DIR/result.txt" ]; then
-        cat "$JOB_DIR/result.txt"
+        redact_stream < "$JOB_DIR/result.txt"
         printf '\n'
       else
         render_status
@@ -1208,28 +1348,30 @@ cmd_show() {
       ;;
     transcript)
       if [ -s "$JOB_DIR/transcript.md" ]; then
-        cat "$JOB_DIR/transcript.md"
+        redact_stream < "$JOB_DIR/transcript.md"
         printf '\n'
       else
-        render_transcript ""
+        render_transcript "" | redact_stream
       fi
       ;;
     metadata)
       if [ -s "$JOB_DIR/metadata.json" ]; then
-        cat "$JOB_DIR/metadata.json"
+        redact_stream < "$JOB_DIR/metadata.json"
       else
         render_status
       fi
       ;;
     raw)
       [ -f "$JOB_DIR/stdout.jsonl" ] || die "raw stdout not found for job: $JOB_ID"
-      cat "$JOB_DIR/stdout.jsonl"
+      redact_stream < "$JOB_DIR/stdout.jsonl"
       ;;
   esac
 }
 
 parse_resume_options() {
   CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
   TITLE=""
   EFFORT="$EFFORT_DEFAULT"
   MODEL=""
@@ -1253,6 +1395,15 @@ parse_resume_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
         ;;
       --title)
         [ "$#" -ge 2 ] || die "--title requires a value"
@@ -1337,6 +1488,7 @@ parse_resume_options() {
   fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
 }
 
 resolve_resume_session() {
@@ -1367,7 +1519,7 @@ resolve_resume_session() {
 
 run_foreground_job() {
   JOB_ID="$(new_job_id)"
-  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+  JOB_DIR="$(job_dir_for "$STATE_ROOT" "$JOB_ID")"
   write_config
   write_file "$JOB_DIR/worker_pid" "$$"
 
@@ -1387,14 +1539,16 @@ run_foreground_job() {
       printf ' session_id=%s session_resumable=%s' "$session" "$session_resumable"
     fi
     printf '\n'
-    cat "$JOB_DIR/result.txt"
+    redact_stream < "$JOB_DIR/result.txt"
     printf '\n'
   else
     local status
     status="$(read_file "$JOB_DIR/status")"
     [ -n "$status" ] || status=failed
     printf '[cc] job=%s status=%s\n' "$JOB_ID" "$status" >&2
-    cat "$JOB_DIR/result.txt" >&2 2>/dev/null || true
+    if [ -f "$JOB_DIR/result.txt" ]; then
+      redact_stream < "$JOB_DIR/result.txt" >&2
+    fi
   fi
   return "$code"
 }
@@ -1413,7 +1567,7 @@ cmd_resume() {
 cmd_start() {
   parse_run_options "$@"
   JOB_ID="$(new_job_id)"
-  JOB_DIR="$(job_dir_for "$CWD" "$JOB_ID")"
+  JOB_DIR="$(job_dir_for "$STATE_ROOT" "$JOB_ID")"
   write_config
 
   local self
@@ -1432,7 +1586,7 @@ cmd_result() {
   status="$(read_file "$JOB_DIR/status")"
   if terminal_status "$status" && [ -f "$JOB_DIR/result.txt" ]; then
     wait_for_result_archive || write_result_archive "Result archive was empty when requested after terminal status."
-    cat "$JOB_DIR/result.txt"
+    redact_stream < "$JOB_DIR/result.txt"
     printf '\n'
     return "$(status_exit_code)"
   fi
@@ -1482,17 +1636,36 @@ render_flag_status() {
 }
 
 render_state_ignore_status() {
-  local root
-  root="$(state_root_for "$CWD")"
+  local root repo rel
+  root="$STATE_ROOT"
   printf 'state_root=%s\n' "$root"
-  if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if git -C "$CWD" check-ignore -q .cc-watch/; then
-      printf 'state_git_ignored=yes\n'
-    else
-      printf 'state_git_ignored=no\n'
-    fi
+  printf 'state_external=%s\n' "$EXTERNAL_STATE_ROOT"
+  if repo="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)"; then
+    case "$root/" in
+      "$repo/"*)
+        rel="${root#$repo/}"
+        if git -C "$repo" check-ignore -q "$rel/"; then
+          printf 'state_git_ignored=yes\n'
+        else
+          printf 'state_git_ignored=no\n'
+          printf 'state_warning=state-root-not-ignored\n'
+        fi
+        ;;
+      *)
+        printf 'state_git_ignored=external\n'
+        printf 'state_warning=external-state-root\n'
+        ;;
+    esac
   else
-    printf 'state_git_ignored=not-git\n'
+    if [ "$EXTERNAL_STATE_ROOT" = "1" ]; then
+      printf 'state_git_ignored=external\n'
+      printf 'state_warning=external-state-root\n'
+    else
+      printf 'state_git_ignored=not-git\n'
+    fi
+  fi
+  if [ -d "$root" ] && [ "$(basename "$root")" != ".cc-watch" ]; then
+    printf 'state_warning=state-root-not-nested\n'
   fi
 }
 
@@ -1530,6 +1703,10 @@ cmd_doctor() {
   render_env_status HTTPS_PROXY
   render_env_status ALL_PROXY
   render_env_status NO_PROXY
+  render_env_status http_proxy
+  render_env_status https_proxy
+  render_env_status all_proxy
+  render_env_status no_proxy
   render_state_ignore_status
 }
 

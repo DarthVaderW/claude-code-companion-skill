@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add best-effort redaction for human-readable `cc-watch` outputs while keeping
+  raw `stdout.jsonl` as local lossless evidence.
+- Add `--state-root` and `--allow-external-state-root` so archives can be stored
+  outside the target project without writing a catch-all `.gitignore` into the
+  user-selected parent directory.
+- Add read-only sibling helper `cc-plugin` for Claude Code plugin `doctor`,
+  `list`, `versions`, and dry-run `plan-update` checks.
+- Add fake-Claude regression tests for redaction, custom state roots, external
+  state-root guards, and read-only plugin admin behavior.
+
 ## v0.4.0 - 2026-06-06
 
 - Add local job titles with `--title TITLE`; titles are stored in cc-watch
