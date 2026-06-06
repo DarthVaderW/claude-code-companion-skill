@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## v0.4.0 - 2026-06-06
 
 - Add local job titles with `--title TITLE`; titles are stored in cc-watch
   state and are not passed to Claude.
@@ -13,11 +13,6 @@
 - Add `cc-watch resume JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT`; job/title
   selectors require a persisted Claude session and fail clearly for default
   non-persistent jobs.
-- Keep the project as a Codex skill unless the script grows into a true
-  cross-project CLI.
-- Prefer small reliability changes over adding daemons, queues, indexes, or a
-  Python package.
-
 ## v0.3.0 - 2026-06-06
 
 - Add durable result archives for every terminal job:
