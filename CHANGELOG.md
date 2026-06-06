@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.1 - 2026-06-07
+
 - Add `cc-watch review-diff` to build a read-only review prompt from tracked
   git diffs and run it through the existing foreground watcher path.
 - Add `cc-watch result --json` for machine-readable result metadata plus final
