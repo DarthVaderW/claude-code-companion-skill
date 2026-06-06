@@ -793,6 +793,7 @@ worker() {
     write_file "$JOB_DIR/status" "failed"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
     write_result_archive "Claude exited non-zero before a final result was available."
+    return "$exit_code"
   fi
   return 1
 }

@@ -220,6 +220,7 @@ fi
 assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "NO FINAL RESULT"
 assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "did not emit a final result"
 assert_contains "$(cat "$(job_dir_for_work "$no_result_work")/metadata.json")" '"status": "failed"'
+assert_json_file "$(job_dir_for_work "$no_result_work")/metadata.json"
 no_result_status="$("$CC_WATCH" status "$no_result_job" --cwd "$no_result_work" || true)"
 assert_contains "$no_result_status" "exit_code=1"
 
@@ -241,6 +242,7 @@ if [ "$error_result_code" -ne 1 ]; then
   fail "error-result result command should return 1, got $error_result_code"
 fi
 assert_contains "$(cat "$TMP_ROOT/error-result-result.out")" "fake auth error"
+assert_json_file "$(job_dir_for_work "$error_result_work")/metadata.json"
 
 partial_result_args="$(run_success_with_behavior partial-result partial-result)"
 assert_contains "$partial_result_args" "--tools Read,Grep,Glob,LS"
@@ -255,6 +257,20 @@ FAKE_ARGS_LOG="$prompt_args" FAKE_BEHAVIOR=success \
 assert_contains "$(cat "$prompt_output")" "fake final review"
 assert_contains "$(cat "$(job_dir_for_work "$prompt_work")/prompt.md")" "review from prompt file"
 assert_contains "$(cat "$(job_dir_for_work "$prompt_work")/metadata.json")" "\"prompt_file\": \"$prompt_file\""
+
+prompt_rel_work="$(new_workdir prompt-file-relative)"
+prompt_rel_dir="$TMP_ROOT/prompt-file-relative-invocation"
+mkdir -p "$prompt_rel_dir"
+printf 'review from relative prompt file\n' > "$prompt_rel_dir/relative-review.md"
+(
+  cd "$prompt_rel_dir"
+  FAKE_ARGS_LOG="$TMP_ROOT/prompt-file-relative.args" FAKE_BEHAVIOR=success \
+    "$CC_WATCH" run --cwd "$prompt_rel_work" --claude "$FAKE_CLAUDE" \
+      --prompt-file relative-review.md > "$TMP_ROOT/prompt-file-relative.out"
+)
+assert_contains "$(cat "$TMP_ROOT/prompt-file-relative.out")" "fake final review"
+assert_contains "$(cat "$(job_dir_for_work "$prompt_rel_work")/prompt.md")" "review from relative prompt file"
+assert_contains "$(cat "$(job_dir_for_work "$prompt_rel_work")/metadata.json")" '"prompt_file": "relative-review.md"'
 
 if FAKE_ARGS_LOG="$TMP_ROOT/prompt-file-bad.args" FAKE_BEHAVIOR=success \
   "$CC_WATCH" run --cwd "$prompt_work" --claude "$FAKE_CLAUDE" --prompt-file "$prompt_file" -- "extra prompt" >/dev/null 2>&1; then
@@ -296,12 +312,20 @@ if [ "$timeout_result_code" -ne 124 ]; then
 fi
 assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "NO FINAL RESULT"
 assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "max runtime"
+assert_json_file "$(job_dir_for_work "$timeout_work")/metadata.json"
 
 fail_work="$(new_workdir fail)"
 fail_args="$TMP_ROOT/fail.args"
-if FAKE_ARGS_LOG="$fail_args" FAKE_BEHAVIOR=fail \
-  "$CC_WATCH" run --cwd "$fail_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
+set +e
+FAKE_ARGS_LOG="$fail_args" FAKE_BEHAVIOR=fail \
+  "$CC_WATCH" run --cwd "$fail_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/fail-run.out" 2>&1
+fail_run_code="$?"
+set -e
+if [ "$fail_run_code" -eq 0 ]; then
   fail "non-zero Claude run should fail"
+fi
+if [ "$fail_run_code" -ne 42 ]; then
+  fail "non-zero Claude run should return 42, got $fail_run_code"
 fi
 fail_job="$(job_id_for_work "$fail_work")"
 set +e
@@ -315,6 +339,7 @@ if [ "$fail_result_code" -ne 42 ]; then
   fail "fail result command should return 42, got $fail_result_code"
 fi
 assert_contains "$(cat "$TMP_ROOT/fail-result.out")" "fake failure"
+assert_json_file "$(job_dir_for_work "$fail_work")/metadata.json"
 if "$CC_WATCH" status "$fail_job" --cwd "$fail_work" > "$TMP_ROOT/fail-status-default.out"; then
   fail "default failed status should return non-zero"
 fi
@@ -365,6 +390,7 @@ assert_contains "$cancel_text" "canceled job=$cancel_job"
 cancel_dir="$(job_dir_for_work "$cancel_work")"
 assert_contains "$(cat "$cancel_dir/result.txt")" "NO FINAL RESULT"
 assert_contains "$(cat "$cancel_dir/metadata.json")" '"status": "canceled"'
+assert_json_file "$cancel_dir/metadata.json"
 cancel_status="$("$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" || true)"
 assert_contains "$cancel_status" "canceled"
 set +e

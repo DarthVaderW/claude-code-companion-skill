@@ -54,8 +54,8 @@ a persistent shell, or a single shell script that starts and waits in one go.
 `status` includes `elapsed=<seconds>`, and jobs time out after 1800 seconds by
 default. Override that with `--max-runtime SEC`, or use `--max-runtime 0` to
 disable the timeout.
-`status` returns zero for running jobs by default. Pass `--strict-exit` when a
-script wants polling-style non-zero exits for `running-*`.
+`status` returns zero for running jobs by default. Existing polling loops should
+pass `--strict-exit` when they need non-zero exits for `running-*`.
 `result` prints `result.txt` for any terminal job and exits non-zero for
 failed, timed-out, or canceled jobs.
 
@@ -141,7 +141,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.2.1
+  --ref v0.3.0
 ```
 
 Restart Codex after installing or updating skills.

@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.0 - 2026-06-06
+
+- Add durable result archives for every terminal job:
+  - `result.txt` as the human-readable entry point
+  - `metadata.json` and `metadata.md` for job metadata
+  - stderr and stream tails in failed, timed-out, and canceled results
+- Add `--prompt-file FILE` for long Markdown prompts.
+- Add `--strict-exit` for `status`.
+- Change default `status` exit behavior: `running-active` and `running-quiet`
+  now return zero unless `--strict-exit` is passed. Existing polling scripts
+  that expect running jobs to return non-zero should add `--strict-exit`.
+- Make `result` print `result.txt` for any terminal job and exit non-zero for
+  failed, timed-out, or canceled jobs.
+- Keep foreground `run` and later `result` exit codes consistent for non-zero
+  Claude exits.
+- Add regression coverage for failed, timed-out, and canceled result archives,
+  metadata JSON validity, relative `--prompt-file` resolution, and exact
+  non-zero exit propagation.
+- Document observed runtime issues and follow-up work in
+  `CC_WATCH_RUNTIME_ISSUES.md`.
+
 ## v0.2.1 - 2026-06-05
 
 - Improve long-running job ergonomics:
