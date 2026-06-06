@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.2 - 2026-06-07
+
 - Add `cc-watch list --json` for machine-readable, newest-first job indexes
   with status, session, timing, and archive path fields.
 - Add `cc-watch findings` / `findings --json` to extract review-oriented
