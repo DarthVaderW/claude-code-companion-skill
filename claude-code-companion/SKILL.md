@@ -143,6 +143,41 @@ separate global-state mutation requiring explicit user approval.
 If `claude plugin versions` is unavailable, `cc-plugin versions` falls back to
 the installed-version view from `claude plugin list`.
 
+For local job cleanup, use dry-run-first archive/prune commands:
+
+```bash
+scripts/cc-watch archive --cwd . --keep 10
+scripts/cc-watch archive --cwd . --keep 10 --yes
+scripts/cc-watch prune --cwd . --keep 10
+scripts/cc-watch prune --cwd . --keep 10 --yes
+```
+
+`prune` never removes running jobs, and `prune --yes` requires an explicit
+selector such as `--keep`, `--older-than-days`, or `--all-terminal`.
+
+## Strict Review Hooks
+
+Use this stricter loop when the user asks for rigorous work, when a task is
+large or risky, or when working in a long-running `/goals` style task where the
+user may be away:
+
+1. Before editing, ask Claude for a read-only plan review. Include the intended
+   changes, constraints, risks, and tests. Codex should inspect Claude's
+   findings before making edits.
+2. After editing and running local checks, ask Claude for a read-only diff
+   review. Include `git diff --stat`, relevant test output, and the key diff or
+   file list. Codex should address concrete findings or explain why they are
+   deferred before finalizing.
+3. Keep Claude read-only by default. Do not pass `--read-write`, `--allow-mcp`,
+   or `--allow-bash` unless the user explicitly approves the added capability.
+
+Suggested titles:
+
+```bash
+scripts/cc-watch run --cwd . --title strict-plan-review -- "Review this implementation plan..."
+scripts/cc-watch run --cwd . --title strict-diff-review -- "Review this completed diff..."
+```
+
 ## Prompt Shape
 
 Use plain Markdown:

@@ -67,6 +67,21 @@ claude-code-companion/scripts/cc-watch show --cwd . --last
 claude-code-companion/scripts/cc-watch show --cwd . repo-review --transcript
 ```
 
+Clean up old local job archives with dry-run-first commands:
+
+```bash
+claude-code-companion/scripts/cc-watch archive --cwd . --keep 10
+claude-code-companion/scripts/cc-watch archive --cwd . --keep 10 --yes
+claude-code-companion/scripts/cc-watch prune --cwd . --keep 10
+claude-code-companion/scripts/cc-watch prune --cwd . --keep 10 --yes
+```
+
+`archive` writes a tarball under `.cc-watch/archives/`. `prune` never removes
+running jobs, and `prune --yes` requires an explicit selector such as `--keep`,
+`--older-than-days`, or `--all-terminal`. `archive --yes` without a selector
+archives every terminal job. `--keep` and `--older-than-days` require positive
+integers; use `--all-terminal` when you intentionally want all terminal jobs.
+
 Runtime state for async jobs is written under the target working directory by
 default:
 
@@ -138,6 +153,11 @@ claude-code-companion/scripts/cc-watch run --read-write --cwd . -- "Take over ed
 
 Do not use `--read-write` for ordinary Codex/Claude collaboration. Prefer
 having Codex pass the relevant diff or file excerpts in the prompt.
+
+For rigorous projects or long-running `/goals` style work, use a strict review
+loop: ask Claude for a read-only plan review before editing, then ask Claude for
+a read-only diff review after edits and local checks. Codex remains responsible
+for deciding which findings to implement.
 
 `cc-watch` passes `--no-session-persistence` to Claude Code by default. Use
 `--persist-session` only when you explicitly want Claude Code to save a

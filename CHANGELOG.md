@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `cc-watch archive` and `cc-watch prune` with dry-run defaults, terminal-job
+  filtering, and explicit `--yes` for destructive cleanup.
+- Document strict plan-review and diff-review hooks for rigorous projects and
+  long-running `/goals` style workflows.
 - Add failure diagnostics to `cc-watch` archives: denied/disallowed tool
   warnings and the last assistant text seen before a missing final result.
 - Add best-effort redaction for human-readable `cc-watch` outputs while keeping

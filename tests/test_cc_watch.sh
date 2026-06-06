@@ -150,6 +150,11 @@ job_dir_for_work() {
   printf '%s/.cc-watch/%s\n' "$work" "$job"
 }
 
+count_job_dirs_for_work() {
+  local work="$1"
+  find "$work/.cc-watch" -maxdepth 2 -name job_id 2>/dev/null | wc -l | tr -d ' '
+}
+
 job_id_for_state_parent() {
   local parent="$1"
   cat "$parent/.cc-watch"/*/job_id
@@ -541,6 +546,56 @@ list_text="$("$CC_WATCH" list --cwd "$async_work")"
 assert_contains "$list_text" "job=$async_job"
 assert_contains "$list_text" "status=finished"
 assert_contains "$list_text" "session_resumable=no"
+
+manage_work="$(new_workdir manage)"
+for i in 1 2 3; do
+  FAKE_ARGS_LOG="$TMP_ROOT/manage-$i.args" FAKE_BEHAVIOR=success \
+    "$CC_WATCH" run --cwd "$manage_work" --claude "$FAKE_CLAUDE" \
+    --title "manage $i" -- "review only" > "$TMP_ROOT/manage-$i.out"
+done
+manage_count="$(count_job_dirs_for_work "$manage_work")"
+[ "$manage_count" -eq 3 ] || fail "expected 3 manage jobs, got $manage_count"
+archive_dry="$("$CC_WATCH" archive --cwd "$manage_work")"
+assert_contains "$archive_dry" "cc-watch archive dry_run=yes selected=3"
+archive_yes="$("$CC_WATCH" archive --cwd "$manage_work" --keep 1 --yes)"
+assert_contains "$archive_yes" "cc-watch archive dry_run=no selected=2"
+assert_contains "$archive_yes" "archive_path="
+archive_path="$(printf '%s\n' "$archive_yes" | awk -F= '/^archive_path=/{print $2}')"
+[ -f "$archive_path" ] || fail "archive file missing: $archive_path"
+archive_listing="$(tar -tzf "$archive_path")"
+assert_contains "$archive_listing" "cc-"
+if "$CC_WATCH" prune --cwd "$manage_work" --yes >/dev/null 2>&1; then
+  fail "prune --yes without selector should fail"
+fi
+if "$CC_WATCH" prune --cwd "$manage_work" --keep 0 --yes >/dev/null 2>&1; then
+  fail "prune --keep 0 --yes should fail"
+fi
+if "$CC_WATCH" prune --cwd "$manage_work" --older-than-days 0 --yes >/dev/null 2>&1; then
+  fail "prune --older-than-days 0 --yes should fail"
+fi
+prune_dry="$("$CC_WATCH" prune --cwd "$manage_work" --keep 1)"
+assert_contains "$prune_dry" "cc-watch prune dry_run=yes selected=2"
+manage_count_after_dry="$(count_job_dirs_for_work "$manage_work")"
+[ "$manage_count_after_dry" -eq 3 ] || fail "dry-run prune should keep 3 jobs, got $manage_count_after_dry"
+prune_yes="$("$CC_WATCH" prune --cwd "$manage_work" --keep 1 --yes)"
+assert_contains "$prune_yes" "cc-watch prune dry_run=no selected=2"
+assert_contains "$prune_yes" "pruned=2"
+manage_count_after_prune="$(count_job_dirs_for_work "$manage_work")"
+[ "$manage_count_after_prune" -eq 1 ] || fail "prune --keep 1 should leave 1 job, got $manage_count_after_prune"
+
+running_prune_work="$(new_workdir running-prune)"
+FAKE_ARGS_LOG="$TMP_ROOT/running-prune-finished.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$running_prune_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/running-prune-finished.out"
+running_prune_pid_file="$TMP_ROOT/running-prune.pid"
+running_prune_args="$TMP_ROOT/running-prune.args"
+running_prune_job="$(FAKE_ARGS_LOG="$running_prune_args" FAKE_BEHAVIOR=slow FAKE_PID_FILE="$running_prune_pid_file" \
+  "$CC_WATCH" start --cwd "$running_prune_work" --claude "$FAKE_CLAUDE" -- "review only")"
+wait_for_file "$running_prune_pid_file"
+wait_for_status "$running_prune_work" "$running_prune_job" "running-" >/dev/null
+running_prune_text="$("$CC_WATCH" prune --cwd "$running_prune_work" --all-terminal --yes)"
+assert_contains "$running_prune_text" "pruned=1"
+[ -d "$running_prune_work/.cc-watch/$running_prune_job" ] || fail "running job should survive prune --all-terminal"
+"$CC_WATCH" cancel "$running_prune_job" --cwd "$running_prune_work" >/dev/null
 
 show_last="$("$CC_WATCH" show --cwd "$async_work" --last)"
 assert_contains "$show_last" "fake final review"

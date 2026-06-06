@@ -17,6 +17,8 @@ Usage:
   cc-watch show [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
   cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
   cc-watch cancel <job-id> [--cwd DIR] [--state-root DIR]
+  cc-watch archive [--cwd DIR] [--state-root DIR] [--older-than-days N] [--keep N] [--all-terminal] [--yes]
+  cc-watch prune [--cwd DIR] [--state-root DIR] [--older-than-days N|--keep N|--all-terminal] [--yes]
   cc-watch doctor [options]
 
 Options:
@@ -24,6 +26,13 @@ Options:
   --state-root DIR      Store/read archives from DIR/.cc-watch instead of <cwd>/.cc-watch.
   --allow-external-state-root
                         Allow --state-root outside --cwd.
+  --older-than-days N   Select terminal jobs older than N days for archive/prune.
+                        N must be positive.
+  --keep N              Keep the newest N terminal jobs out of archive/prune selection.
+                        N must be positive.
+  --all-terminal        Select all terminal jobs for prune. Required for prune --yes
+                        unless --older-than-days or --keep is provided.
+  --yes                 Actually archive/prune. Without --yes, archive/prune is dry-run.
   --title TITLE         Human-readable local job title. Not passed to Claude.
   --effort LEVEL        Claude effort level. Default: max.
   --model MODEL         Optional Claude model.
@@ -1738,6 +1747,184 @@ cmd_cancel() {
   printf 'canceled job=%s\n' "$JOB_ID"
 }
 
+parse_manage_options() {
+  CWD="."
+  STATE_ROOT_RAW=""
+  ALLOW_EXTERNAL_STATE_ROOT=0
+  MANAGE_OLDER_THAN_DAYS=0
+  MANAGE_KEEP=0
+  MANAGE_ALL_TERMINAL=0
+  MANAGE_YES=0
+  MANAGE_HAS_SELECTOR=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd)
+        [ "$#" -ge 2 ] || die "--cwd requires a value"
+        CWD="$2"
+        shift 2
+        ;;
+      --state-root)
+        [ "$#" -ge 2 ] || die "--state-root requires a value"
+        STATE_ROOT_RAW="$2"
+        shift 2
+        ;;
+      --allow-external-state-root)
+        ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
+        ;;
+      --older-than-days)
+        [ "$#" -ge 2 ] || die "--older-than-days requires a value"
+        MANAGE_OLDER_THAN_DAYS="$2"
+        validate_nonnegative_int "--older-than-days" "$MANAGE_OLDER_THAN_DAYS"
+        [ "$MANAGE_OLDER_THAN_DAYS" -gt 0 ] || die "--older-than-days must be greater than zero"
+        MANAGE_HAS_SELECTOR=1
+        shift 2
+        ;;
+      --keep)
+        [ "$#" -ge 2 ] || die "--keep requires a value"
+        MANAGE_KEEP="$2"
+        validate_nonnegative_int "--keep" "$MANAGE_KEEP"
+        [ "$MANAGE_KEEP" -gt 0 ] || die "--keep must be greater than zero"
+        MANAGE_HAS_SELECTOR=1
+        shift 2
+        ;;
+      --all-terminal)
+        MANAGE_ALL_TERMINAL=1
+        MANAGE_HAS_SELECTOR=1
+        shift
+        ;;
+      --yes)
+        MANAGE_YES=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+
+  CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
+  resolve_state_root
+}
+
+list_manage_candidates() {
+  local now
+  now="$(now_epoch)"
+  perl -e '
+    use strict;
+    use warnings;
+    my ($root, $older_days, $keep, $now) = @ARGV;
+    my $cutoff = $older_days > 0 ? $now - ($older_days * 86400) : undef;
+    opendir(my $dh, $root) or exit 0;
+    my @jobs;
+    for my $name (readdir($dh)) {
+      next unless $name =~ /^cc-/;
+      my $dir = "$root/$name";
+      next unless -d $dir && -f "$dir/job_id";
+      my $status = slurp("$dir/status");
+      next unless $status =~ /^(finished|failed|canceled|timed-out)$/;
+      my $started = slurp("$dir/started_at");
+      $started = 0 unless defined $started && $started =~ /^\d+$/;
+      push @jobs, [$started, $name, $status, $dir];
+    }
+    @jobs = sort { $b->[0] <=> $a->[0] || $b->[1] cmp $a->[1] } @jobs;
+    my $index = 0;
+    for my $job (@jobs) {
+      $index++;
+      next if $keep > 0 && $index <= $keep;
+      next if defined $cutoff && $job->[0] > $cutoff;
+      print join("\t", $job->[3], $job->[1], $job->[2], $job->[0]), "\n";
+    }
+    sub slurp {
+      my ($path) = @_;
+      open(my $fh, "<", $path) or return "";
+      local $/;
+      my $value = <$fh>;
+      chomp $value if defined $value;
+      return $value // "";
+    }
+  ' "$STATE_ROOT" "$MANAGE_OLDER_THAN_DAYS" "$MANAGE_KEEP" "$now"
+}
+
+print_manage_plan() {
+  local action="$1"
+  local candidates="$2"
+  local count=0 line dir job status started
+  [ -n "$candidates" ] && count="$(printf '%s\n' "$candidates" | awk -F '\t' 'NF >= 3 && $2 != "" { c++ } END { print c + 0 }')"
+  printf 'cc-watch %s dry_run=%s selected=%s state_root=%s\n' "$action" "$([ "$MANAGE_YES" = "1" ] && printf no || printf yes)" "$count" "$STATE_ROOT"
+  printf 'filters older_than_days=%s keep=%s all_terminal=%s\n' "$MANAGE_OLDER_THAN_DAYS" "$MANAGE_KEEP" "$MANAGE_ALL_TERMINAL"
+  if [ "$count" -gt 0 ]; then
+    printf '%s\n' "$candidates" | while IFS="$(printf '\t')" read -r dir job status started; do
+      [ -n "$job" ] || continue
+      printf 'selected job=%s status=%s started_at=%s dir=%s\n' "$job" "$status" "$started" "$dir"
+    done
+  fi
+}
+
+create_jobs_archive() {
+  local candidates="$1"
+  local count archive_dir archive_path job_names=() line dir job status started
+  count="$(printf '%s\n' "$candidates" | awk -F '\t' 'NF >= 3 && $2 != "" { c++ } END { print c + 0 }')"
+  [ "$count" -gt 0 ] || return 0
+  archive_dir="$STATE_ROOT/archives"
+  mkdir -p "$archive_dir" || die "cannot create archive dir: $archive_dir"
+  archive_path="$archive_dir/cc-watch-$(date +%Y%m%d%H%M%S)-$count-jobs.tar.gz"
+  while IFS="$(printf '\t')" read -r dir job status started; do
+    [ -n "$job" ] || continue
+    job_names+=("$job")
+  done <<EOF
+$candidates
+EOF
+  tar -czf "$archive_path" -C "$STATE_ROOT" "${job_names[@]}" || die "cannot create archive: $archive_path"
+  printf 'archive_path=%s\n' "$archive_path"
+}
+
+cmd_archive() {
+  parse_manage_options "$@"
+  local candidates
+  candidates="$(list_manage_candidates)"
+  print_manage_plan archive "$candidates"
+  if [ "$MANAGE_YES" = "1" ] && [ -n "$candidates" ]; then
+    create_jobs_archive "$candidates"
+  fi
+}
+
+cmd_prune() {
+  parse_manage_options "$@"
+  if [ "$MANAGE_YES" = "1" ] && [ "$MANAGE_HAS_SELECTOR" != "1" ]; then
+    die "prune --yes requires --older-than-days, --keep, or --all-terminal"
+  fi
+
+  local candidates count dir job status started
+  candidates="$(list_manage_candidates)"
+  print_manage_plan prune "$candidates"
+  [ "$MANAGE_YES" = "1" ] || return 0
+  [ -n "$candidates" ] || return 0
+  count=0
+  while IFS="$(printf '\t')" read -r dir job status started; do
+    [ -n "$job" ] || continue
+    status="$(read_file "$dir/status")"
+    case "$status" in
+      finished|failed|canceled|timed-out) ;;
+      *) die "refusing to prune non-terminal job: $job status=$status" ;;
+    esac
+    if is_pid_alive "$(read_file "$dir/worker_pid")" || is_pid_alive "$(read_file "$dir/claude_pid")"; then
+      printf 'skipped job=%s reason=process-alive\n' "$job"
+      continue
+    fi
+    rm -rf "$dir" || die "cannot prune job: $job"
+    count=$((count + 1))
+  done <<EOF
+$candidates
+EOF
+  printf 'pruned=%s\n' "$count"
+}
+
 render_env_status() {
   local key="$1"
   if [ -n "${!key:-}" ]; then
@@ -1854,6 +2041,8 @@ main() {
       ;;
     result) cmd_result "$@" ;;
     cancel) cmd_cancel "$@" ;;
+    archive) cmd_archive "$@" ;;
+    prune) cmd_prune "$@" ;;
     doctor) cmd_doctor "$@" ;;
     __worker) worker "$@" ;;
     __worker_guard) worker_guard "$@" ;;

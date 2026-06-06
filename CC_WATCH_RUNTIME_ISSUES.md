@@ -20,6 +20,10 @@ Resolved after `v0.3.0`:
   `doctor`, `list`, `versions`, and dry-run `plan-update` checks.
 - Failed jobs now surface denied/disallowed tool warnings and the last
   assistant text seen before a missing final result.
+- `cc-watch archive` and `cc-watch prune` were added with dry-run defaults and
+  explicit `--yes` for actual cleanup.
+- Strict plan-review and diff-review hooks are documented for rigorous projects
+  and long-running `/goals` style workflows.
 
 Resolved in `v0.3.0`:
 
@@ -41,9 +45,11 @@ Resolved in `v0.3.0`:
 
 1. Add more `doctor` guidance for custom state roots if real-world usage shows
    confusing archive locations.
-2. Add job management helpers such as `prune` or `archive`.
-3. Consider an optional heartbeat for long foreground `run` jobs so Codex can
+2. Consider an optional heartbeat for long foreground `run` jobs so Codex can
    distinguish slow progress from silence.
+3. Add a cleanup path for stale `running-*` jobs whose worker process has
+   already died; current prune/archive intentionally skip raw non-terminal
+   status files.
 4. Document the release and install/update path for GitHub-tagged skill
    installs separately from local symlink development installs.
 5. Keep mutating Claude plugin operations out of `cc-watch`. If a future
