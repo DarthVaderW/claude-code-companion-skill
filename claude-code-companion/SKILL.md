@@ -19,7 +19,7 @@ Call Claude Code when at least one of these is true:
   missed issues.
 - A research task can be split so Codex and Claude investigate in parallel.
 - Claude may take a long time, and Codex needs a reliable way to wait, poll, and
-  retrieve the final answer without reading raw stream-json.
+  retrieve the archived result without reading raw stream-json.
 
 Do not call Claude for tiny tasks where Codex can answer directly.
 
@@ -33,6 +33,7 @@ Do not call Claude for tiny tasks where Codex can answer directly.
   by default and disables MCP config unless `--allow-mcp` is explicit.
 - Prefer passing diffs, file lists, or command output in the prompt. Use
   `--allow-bash` only when Claude genuinely needs shell access.
+- For long prompts, write a Markdown prompt file and pass `--prompt-file`.
 - Use `--read-write` only when the user explicitly asks Claude Code to take over
   edits. Codex should normally remain the writer.
 - Use the helper's default fresh non-persistent print-mode session for one-off
@@ -62,6 +63,15 @@ For short synchronous work:
 scripts/cc-watch run --cwd . -- "Review the current diff. Return only actionable findings."
 ```
 
+For long prompts:
+
+```bash
+scripts/cc-watch run --cwd . --prompt-file review.md
+```
+
+Relative `--prompt-file` paths resolve from the shell invocation directory, not
+from `--cwd`.
+
 Before diagnosing auth, proxy, PATH, or CLI flag issues:
 
 ```bash
@@ -88,6 +98,14 @@ will remain alive; some command runners clean background children when the tool
 call exits. Use `status` while waiting. `running-quiet` means Claude is still
 alive but has not emitted stream-json recently; do not treat it as failure. Use
 `--max-runtime SEC` to bound long Opus jobs when needed.
+
+Every terminal job writes `.cc-watch/<job-id>/result.txt`, `metadata.json`,
+`metadata.md`, `prompt.md`, `stdout.jsonl`, and `stderr.log`. Treat
+`result.txt` as the human-readable archive entry and `stdout.jsonl` as the
+lossless raw evidence. `result` prints `result.txt` for any terminal job and
+exits non-zero for failed, timed-out, or canceled jobs. `status` returns zero
+for running jobs by default; use `--strict-exit` only when a script needs
+polling-style non-zero exits.
 
 ## Prompt Shape
 

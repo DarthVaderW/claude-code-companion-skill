@@ -11,7 +11,7 @@ usage() {
 Usage:
   cc-watch run [options] -- PROMPT
   cc-watch start [options] -- PROMPT
-  cc-watch status <job-id> [--cwd DIR]
+  cc-watch status <job-id> [--cwd DIR] [--strict-exit]
   cc-watch result <job-id> [--cwd DIR]
   cc-watch cancel <job-id> [--cwd DIR]
   cc-watch doctor [options]
@@ -21,6 +21,7 @@ Options:
   --effort LEVEL        Claude effort level. Default: max.
   --model MODEL         Optional Claude model.
   --claude PATH         Claude binary. Default: $CLAUDE_BIN or claude.
+  --prompt-file FILE    Read the prompt from a Markdown file instead of args/stdin.
   --quiet-after SEC     Seconds without stream events before running-quiet.
   --max-runtime SEC     Maximum job runtime before timeout. Default: 1800.
   --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
@@ -33,6 +34,8 @@ Options:
 
 The script consumes Claude's raw stream-json output and prints only compact
 status plus the final result. Async state is stored under <cwd>/.cc-watch/.
+Every terminal job writes a human-readable result.txt plus machine-readable
+metadata.json and metadata.md. Raw stdout.jsonl and stderr.log are retained.
 EOF
 }
 
@@ -91,6 +94,14 @@ read_file() {
   if [ -f "$path" ]; then
     cat "$path"
   fi
+}
+
+json_string() {
+  perl -MJSON::PP -CS -e '
+    local $/;
+    my $value = <STDIN>;
+    print JSON::PP->new->ascii(0)->allow_nonref->encode($value);
+  '
 }
 
 is_pid_alive() {
@@ -194,6 +205,7 @@ parse_run_options() {
   NO_SESSION_PERSISTENCE=1
   RESUME_SESSION=""
   CONTINUE_SESSION=0
+  PROMPT_FILE=""
   PROMPT_ARGS=()
 
   while [ "$#" -gt 0 ]; do
@@ -216,6 +228,11 @@ parse_run_options() {
       --claude)
         [ "$#" -ge 2 ] || die "--claude requires a value"
         CLAUDE="$2"
+        shift 2
+        ;;
+      --prompt-file)
+        [ "$#" -ge 2 ] || die "--prompt-file requires a value"
+        PROMPT_FILE="$2"
         shift 2
         ;;
       --quiet-after)
@@ -275,6 +292,12 @@ parse_run_options() {
   if [ -n "$RESUME_SESSION" ] && [ "$CONTINUE_SESSION" = "1" ]; then
     die "--resume and --continue cannot be used together"
   fi
+  if [ -n "$PROMPT_FILE" ] && [ "${#PROMPT_ARGS[@]}" -gt 0 ]; then
+    die "--prompt-file cannot be combined with prompt arguments"
+  fi
+  if [ -n "$PROMPT_FILE" ] && [ ! -f "$PROMPT_FILE" ]; then
+    die "prompt file not found: $PROMPT_FILE"
+  fi
 
   CWD="$(absolute_dir "$CWD")" || die "cannot enter cwd: $CWD"
 }
@@ -282,6 +305,7 @@ parse_run_options() {
 parse_job_options() {
   CWD="."
   JOB_ID=""
+  STRICT_EXIT=0
 
   [ "$#" -ge 1 ] || die "missing job id"
   JOB_ID="$1"
@@ -293,6 +317,10 @@ parse_job_options() {
         [ "$#" -ge 2 ] || die "--cwd requires a value"
         CWD="$2"
         shift 2
+        ;;
+      --strict-exit)
+        STRICT_EXIT=1
+        shift
         ;;
       -h|--help)
         usage
@@ -353,13 +381,21 @@ write_config() {
   write_file "$JOB_DIR/no_session_persistence" "$NO_SESSION_PERSISTENCE"
   write_file "$JOB_DIR/resume_session" "$RESUME_SESSION"
   write_file "$JOB_DIR/continue_session" "$CONTINUE_SESSION"
+  write_file "$JOB_DIR/prompt_file" "$PROMPT_FILE"
   write_file "$JOB_DIR/status" "starting"
   write_file "$JOB_DIR/started_at" "$(now_epoch)"
   write_file "$JOB_DIR/last_event_at" "0"
-  parse_prompt "${PROMPT_ARGS[@]}" > "$JOB_DIR/prompt.md"
+  if [ -n "$PROMPT_FILE" ]; then
+    cat "$PROMPT_FILE" > "$JOB_DIR/prompt.md" || die "cannot read prompt file: $PROMPT_FILE"
+  elif [ "${#PROMPT_ARGS[@]}" -gt 0 ]; then
+    parse_prompt "${PROMPT_ARGS[@]}" > "$JOB_DIR/prompt.md"
+  else
+    cat > "$JOB_DIR/prompt.md"
+  fi
 }
 
 load_config() {
+  JOB_ID="$(read_file "$JOB_DIR/job_id")"
   CWD="$(read_file "$JOB_DIR/cwd")"
   CLAUDE="$(read_file "$JOB_DIR/claude")"
   EFFORT="$(read_file "$JOB_DIR/effort")"
@@ -376,6 +412,163 @@ load_config() {
   NO_SESSION_PERSISTENCE="$(read_file "$JOB_DIR/no_session_persistence")"
   RESUME_SESSION="$(read_file "$JOB_DIR/resume_session")"
   CONTINUE_SESSION="$(read_file "$JOB_DIR/continue_session")"
+  PROMPT_FILE="$(read_file "$JOB_DIR/prompt_file")"
+}
+
+terminal_status() {
+  case "$1" in
+    finished|failed|canceled|timed-out) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+job_elapsed_seconds() {
+  local started_at finished_at now
+  started_at="$(read_file "$JOB_DIR/started_at")"
+  finished_at="$(read_file "$JOB_DIR/finished_at")"
+  now="$(now_epoch)"
+  [ -n "$started_at" ] || started_at="$now"
+  [ -n "$finished_at" ] || finished_at="$now"
+  printf '%s\n' "$((finished_at - started_at))"
+}
+
+status_exit_code() {
+  local status exit_code
+  status="$(read_file "$JOB_DIR/status")"
+  exit_code="$(read_file "$JOB_DIR/exit_code")"
+  if [ -n "$exit_code" ]; then
+    if [ "$status" != "finished" ] && [ "$exit_code" = "0" ]; then
+      printf '1\n'
+      return 0
+    fi
+    printf '%s\n' "$exit_code"
+    return 0
+  fi
+  case "$status" in
+    finished) printf '0\n' ;;
+    timed-out) printf '124\n' ;;
+    canceled) printf '130\n' ;;
+    *) printf '1\n' ;;
+  esac
+}
+
+wait_for_result_archive() {
+  local result_file="$JOB_DIR/result.txt"
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$result_file" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+write_metadata_files() {
+  local status exit_code started_at finished_at elapsed session session_resumable
+  status="$(read_file "$JOB_DIR/status")"
+  exit_code="$(status_exit_code)"
+  started_at="$(read_file "$JOB_DIR/started_at")"
+  finished_at="$(read_file "$JOB_DIR/finished_at")"
+  elapsed="$(job_elapsed_seconds)"
+  session="$(read_file "$JOB_DIR/session_id")"
+  session_resumable=no
+  if [ -n "$session" ] && [ "$(read_file "$JOB_DIR/no_session_persistence")" != "1" ]; then
+    session_resumable=yes
+  fi
+
+  local tmp_json="$JOB_DIR/metadata.json.$$"
+  {
+    printf '{\n'
+    printf '  "job_id": %s,\n' "$(printf '%s' "$JOB_ID" | json_string)"
+    printf '  "status": %s,\n' "$(printf '%s' "$status" | json_string)"
+    printf '  "exit_code": %s,\n' "$exit_code"
+    printf '  "cwd": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/cwd")" | json_string)"
+    printf '  "claude": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/claude")" | json_string)"
+    printf '  "model": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/model")" | json_string)"
+    printf '  "effort": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/effort")" | json_string)"
+    printf '  "started_at": %s,\n' "${started_at:-0}"
+    printf '  "finished_at": %s,\n' "${finished_at:-0}"
+    printf '  "elapsed_seconds": %s,\n' "$elapsed"
+    printf '  "session_id": %s,\n' "$(printf '%s' "$session" | json_string)"
+    printf '  "session_resumable": %s,\n' "$(printf '%s' "$session_resumable" | json_string)"
+    printf '  "allow_bash": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_bash")" | json_string)"
+    printf '  "allow_mcp": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_mcp")" | json_string)"
+    printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
+    printf '  "prompt_file": %s\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
+    printf '}\n'
+  } > "$tmp_json"
+  mv "$tmp_json" "$JOB_DIR/metadata.json"
+
+  local tmp_md="$JOB_DIR/metadata.md.$$"
+  {
+    printf '# cc-watch metadata\n\n'
+    printf '%s\n' "- job: \`$JOB_ID\`"
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
+    printf '%s\n' "- cwd: \`$(read_file "$JOB_DIR/cwd")\`"
+    printf '%s\n' "- model: \`$(read_file "$JOB_DIR/model")\`"
+    printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
+    if [ -n "$session" ]; then
+      printf '%s\n' "- session_id: \`$session\`"
+      printf '%s\n' "- session_resumable: \`$session_resumable\`"
+    fi
+  } > "$tmp_md"
+  mv "$tmp_md" "$JOB_DIR/metadata.md"
+}
+
+write_result_archive() {
+  local reason="$1"
+  local status exit_code elapsed session result_text_file stderr_log stdout_log
+  status="$(read_file "$JOB_DIR/status")"
+  exit_code="$(status_exit_code)"
+  elapsed="$(job_elapsed_seconds)"
+  session="$(read_file "$JOB_DIR/session_id")"
+  result_text_file="$JOB_DIR/final-text.txt"
+  stderr_log="$JOB_DIR/stderr.log"
+  stdout_log="$JOB_DIR/stdout.jsonl"
+
+  write_metadata_files
+
+  local tmp_result="$JOB_DIR/result.txt.$$"
+  {
+    printf '# cc-watch result\n\n'
+    printf '%s\n' "- job: \`$JOB_ID\`"
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- elapsed_seconds: \`$elapsed\`"
+    printf '%s\n' "- cwd: \`$(read_file "$JOB_DIR/cwd")\`"
+    printf '%s\n' "- model: \`$(read_file "$JOB_DIR/model")\`"
+    printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
+    if [ -n "$session" ]; then
+      printf '%s\n' "- session_id: \`$session\`"
+    fi
+    if [ -n "$reason" ]; then
+      printf '%s\n' "- reason: \`$reason\`"
+    fi
+    printf '\n## Output\n\n'
+    if [ -s "$result_text_file" ]; then
+      cat "$result_text_file"
+      printf '\n'
+    elif [ "$status" = "finished" ] && [ -s "$JOB_DIR/final-result.json" ]; then
+      printf '(Claude returned an empty final result.)\n'
+    else
+      printf 'NO FINAL RESULT\n\n'
+      if [ -n "$reason" ]; then
+        printf '%s\n\n' "$reason"
+      fi
+      if [ -s "$stderr_log" ]; then
+        printf '## stderr tail\n\n```text\n'
+        tail -40 "$stderr_log"
+        printf '\n```\n\n'
+      fi
+      if [ -s "$stdout_log" ]; then
+        printf '## stdout.jsonl tail\n\n```jsonl\n'
+        tail -20 "$stdout_log"
+        printf '\n```\n'
+      fi
+    fi
+  } > "$tmp_result"
+  mv "$tmp_result" "$JOB_DIR/result.txt"
 }
 
 build_claude_args() {
@@ -495,6 +688,7 @@ worker() {
   local stdout_log="$JOB_DIR/stdout.jsonl"
   local exit_code_file="$JOB_DIR/exit_code"
   local result_file="$JOB_DIR/result.txt"
+  local final_text_file="$JOB_DIR/final-text.txt"
   local final_line_file="$JOB_DIR/final-result.json"
 
   rm -f "$fifo"
@@ -502,12 +696,15 @@ worker() {
   : > "$stderr_log"
   : > "$stdout_log"
   : > "$result_file"
+  : > "$final_text_file"
   rm -f "$exit_code_file" "$final_line_file"
 
   preflight_claude "$stderr_log" || {
     local code="$?"
     write_file "$JOB_DIR/exit_code" "$code"
     write_file "$JOB_DIR/status" "failed"
+    write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+    write_result_archive "Claude preflight failed before a final result was available."
     return "$code"
   }
 
@@ -543,7 +740,7 @@ worker() {
     if printf '%s\n' "$line" | grep -q '"type"[[:space:]]*:[[:space:]]*"result"'; then
       saw_result=1
       printf '%s\n' "$line" > "$final_line_file"
-      extract_result_line "$line" > "$result_file"
+      extract_result_line "$line" > "$final_text_file"
       result_is_error="$(printf '%s' "$line" | json_field_from_stdin is_error 2>/dev/null || true)"
       result_subtype="$(printf '%s' "$line" | json_field_from_stdin subtype 2>/dev/null || true)"
     fi
@@ -562,11 +759,13 @@ worker() {
   if [ "$(read_file "$JOB_DIR/status")" = "timed-out" ]; then
     write_file "$JOB_DIR/exit_code" "124"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+    write_result_archive "Claude job exceeded max runtime before a final result was available."
     return 124
   fi
   if [ "$(read_file "$JOB_DIR/status")" = "canceled" ]; then
     write_file "$JOB_DIR/exit_code" "130"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+    write_result_archive "Claude job was canceled before a final result was available."
     return 130
   fi
 
@@ -576,10 +775,12 @@ worker() {
       write_file "$JOB_DIR/finished_at" "$(now_epoch)"
       printf 'Claude final result was an error event: subtype=%s is_error=%s\n' \
         "$result_subtype" "$result_is_error" >> "$stderr_log"
+      write_result_archive "Claude emitted an error result event."
       return 1
     fi
     write_file "$JOB_DIR/status" "finished"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+    write_result_archive ""
     return 0
   fi
 
@@ -587,9 +788,11 @@ worker() {
     write_file "$JOB_DIR/status" "failed"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
     printf 'Claude exited with code 0 but no final result event was found.\n' >> "$stderr_log"
+    write_result_archive "Claude exited successfully but did not emit a final result event."
   else
     write_file "$JOB_DIR/status" "failed"
     write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+    write_result_archive "Claude exited non-zero before a final result was available."
   fi
   return 1
 }
@@ -607,8 +810,12 @@ worker_guard() {
     *)
       write_file "$JOB_DIR/exit_code" "$code"
       write_file "$JOB_DIR/status" "failed"
+      write_file "$JOB_DIR/finished_at" "$(now_epoch)"
       ;;
   esac
+  if terminal_status "$(read_file "$JOB_DIR/status")" && [ ! -s "$JOB_DIR/result.txt" ]; then
+    write_result_archive "Worker guard finalized the job without a result archive."
+  fi
   return "$code"
 }
 
@@ -665,13 +872,20 @@ render_status() {
   [ -n "$claude_pid" ] && printf ' claude_pid=%s' "$claude_pid"
   [ -n "$worker_pid" ] && printf ' worker_pid=%s' "$worker_pid"
   [ -n "$last_event" ] && [ "$last_event" != "0" ] && printf ' last_event_at=%s' "$last_event"
-  [ -n "$exit_code" ] && printf ' exit_code=%s' "$exit_code"
+  [ -n "$exit_code" ] && printf ' exit_code=%s' "$(status_exit_code)"
   if [ -n "$session" ]; then
     session_resumable=yes
     [ "$no_session_persistence" = "1" ] && session_resumable=no
     printf ' session_id=%s session_resumable=%s' "$session" "$session_resumable"
   fi
   printf '\n'
+
+  if [ "${STRICT_EXIT:-0}" != "1" ]; then
+    case "$rendered" in
+      finished|running-active|running-quiet) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
 
   case "$rendered" in
     finished) return 0 ;;
@@ -710,7 +924,7 @@ cmd_run() {
     status="$(read_file "$JOB_DIR/status")"
     [ -n "$status" ] || status=failed
     printf '[cc] job=%s status=%s\n' "$JOB_ID" "$status" >&2
-    tail -40 "$JOB_DIR/stderr.log" >&2 2>/dev/null || true
+    cat "$JOB_DIR/result.txt" >&2 2>/dev/null || true
   fi
   return "$code"
 }
@@ -735,14 +949,15 @@ cmd_result() {
 
   local status
   status="$(read_file "$JOB_DIR/status")"
-  if [ "$status" = "finished" ] && [ -f "$JOB_DIR/result.txt" ]; then
+  if terminal_status "$status" && [ -f "$JOB_DIR/result.txt" ]; then
+    wait_for_result_archive || write_result_archive "Result archive was empty when requested after terminal status."
     cat "$JOB_DIR/result.txt"
     printf '\n'
-    return 0
+    return "$(status_exit_code)"
   fi
 
   render_status
-  return $?
+  return 2
 }
 
 cmd_cancel() {
@@ -760,6 +975,7 @@ cmd_cancel() {
   write_file "$JOB_DIR/status" "canceled"
   write_file "$JOB_DIR/exit_code" "130"
   write_file "$JOB_DIR/finished_at" "$(now_epoch)"
+  write_result_archive "Claude job was canceled before a final result was available."
   kill_job_pids
   printf 'canceled job=%s\n' "$JOB_ID"
 }

@@ -24,6 +24,15 @@ Run directly from this checkout:
 claude-code-companion/scripts/cc-watch run --cwd . -- "Review the current changes."
 ```
 
+For long prompts, store the prompt in a Markdown file and pass it explicitly:
+
+```bash
+claude-code-companion/scripts/cc-watch run --cwd . --prompt-file review.md
+```
+
+Relative prompt-file paths are resolved from the shell invocation directory, not
+from `--cwd`.
+
 Check local readiness without sending a model request:
 
 ```bash
@@ -45,12 +54,34 @@ a persistent shell, or a single shell script that starts and waits in one go.
 `status` includes `elapsed=<seconds>`, and jobs time out after 1800 seconds by
 default. Override that with `--max-runtime SEC`, or use `--max-runtime 0` to
 disable the timeout.
+`status` returns zero for running jobs by default. Pass `--strict-exit` when a
+script wants polling-style non-zero exits for `running-*`.
+`result` prints `result.txt` for any terminal job and exits non-zero for
+failed, timed-out, or canceled jobs.
 
 Runtime state for async jobs is written only under the target working directory:
 
 ```text
 .cc-watch/
 ```
+
+Each job directory keeps both human-readable and raw evidence:
+
+```text
+.cc-watch/<job-id>/
+  prompt.md          Prompt sent to Claude
+  result.txt         Human-readable result archive for every terminal state
+  metadata.json      Machine-readable job metadata
+  metadata.md        Human-readable job metadata
+  stdout.jsonl       Raw Claude stream-json
+  stderr.log         Raw stderr and failure details
+```
+
+`result.txt` is guaranteed for terminal jobs. On success it contains Claude's
+final answer. On `failed`, `timed-out`, or `canceled`, it contains a status
+header plus `NO FINAL RESULT`, the reason, stderr tail, and raw stream tail when
+available. Treat `stdout.jsonl` as the lossless source of truth and
+`result.txt` as the convenient human entry point.
 
 You can remove that directory at any time after jobs finish.
 
@@ -65,7 +96,8 @@ accident.
 - Allowed built-in tools: `Read`, `Grep`, `Glob`, `LS` when supported by Claude.
 - MCP config is disabled by default with a strict empty MCP config.
 - Session persistence is disabled by default with `--no-session-persistence`.
-- Raw `stream-json` is saved locally but only the final result is printed.
+- Raw `stream-json` is saved locally; `result.txt` is the human-readable
+  archive view.
 
 Use explicit opt-ins only when needed:
 

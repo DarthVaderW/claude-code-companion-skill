@@ -87,6 +87,12 @@ assert_not_contains() {
   esac
 }
 
+assert_json_file() {
+  local path="$1"
+  perl -MJSON::PP -e 'local $/; JSON::PP->new->decode(<STDIN>);' < "$path" \
+    || fail "invalid JSON file: $path"
+}
+
 wait_for_status() {
   local work="$1"
   local job="$2"
@@ -116,6 +122,18 @@ wait_for_file() {
   fail "file was not written: $path"
 }
 
+job_id_for_work() {
+  local work="$1"
+  cat "$work/.cc-watch"/*/job_id
+}
+
+job_dir_for_work() {
+  local work="$1"
+  local job
+  job="$(job_id_for_work "$work")"
+  printf '%s/.cc-watch/%s\n' "$work" "$job"
+}
+
 new_workdir() {
   local dir="$TMP_ROOT/work-$1"
   mkdir -p "$dir"
@@ -133,6 +151,10 @@ run_success_with_behavior() {
   FAKE_ARGS_LOG="$args_log" FAKE_BEHAVIOR="$behavior" \
     "$CC_WATCH" run --cwd "$work" --claude "$FAKE_CLAUDE" "$@" -- "review only" > "$output"
   assert_contains "$(cat "$output")" "fake final review"
+  assert_contains "$(cat "$(job_dir_for_work "$work")/result.txt")" "# cc-watch result"
+  assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.json")" '"status": "finished"'
+  assert_json_file "$(job_dir_for_work "$work")/metadata.json"
+  assert_contains "$(cat "$(job_dir_for_work "$work")/metadata.md")" "# cc-watch metadata"
   [ -f "$work/.cc-watch/.gitignore" ] || fail "missing state .gitignore"
   tail -1 "$args_log"
 }
@@ -184,6 +206,22 @@ if FAKE_ARGS_LOG="$no_result_args" FAKE_BEHAVIOR=no-result \
   "$CC_WATCH" run --cwd "$no_result_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
   fail "no-result run should fail"
 fi
+no_result_job="$(job_id_for_work "$no_result_work")"
+set +e
+"$CC_WATCH" result "$no_result_job" --cwd "$no_result_work" > "$TMP_ROOT/no-result-result.out" 2>&1
+no_result_code="$?"
+set -e
+if [ "$no_result_code" -eq 0 ]; then
+  fail "no-result result command should return non-zero"
+fi
+if [ "$no_result_code" -ne 1 ]; then
+  fail "no-result result command should return 1, got $no_result_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "NO FINAL RESULT"
+assert_contains "$(cat "$TMP_ROOT/no-result-result.out")" "did not emit a final result"
+assert_contains "$(cat "$(job_dir_for_work "$no_result_work")/metadata.json")" '"status": "failed"'
+no_result_status="$("$CC_WATCH" status "$no_result_job" --cwd "$no_result_work" || true)"
+assert_contains "$no_result_status" "exit_code=1"
 
 error_result_work="$(new_workdir error-result)"
 error_result_args="$TMP_ROOT/error-result.args"
@@ -191,9 +229,48 @@ if FAKE_ARGS_LOG="$error_result_args" FAKE_BEHAVIOR=error-result \
   "$CC_WATCH" run --cwd "$error_result_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
   fail "error-result run should fail"
 fi
+error_result_job="$(job_id_for_work "$error_result_work")"
+set +e
+"$CC_WATCH" result "$error_result_job" --cwd "$error_result_work" > "$TMP_ROOT/error-result-result.out" 2>&1
+error_result_code="$?"
+set -e
+if [ "$error_result_code" -eq 0 ]; then
+  fail "error-result result command should return non-zero"
+fi
+if [ "$error_result_code" -ne 1 ]; then
+  fail "error-result result command should return 1, got $error_result_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/error-result-result.out")" "fake auth error"
 
 partial_result_args="$(run_success_with_behavior partial-result partial-result)"
 assert_contains "$partial_result_args" "--tools Read,Grep,Glob,LS"
+
+prompt_work="$(new_workdir prompt-file)"
+prompt_args="$TMP_ROOT/prompt-file.args"
+prompt_file="$TMP_ROOT/review-prompt.md"
+prompt_output="$TMP_ROOT/prompt-file.out"
+printf 'review from prompt file\n' > "$prompt_file"
+FAKE_ARGS_LOG="$prompt_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$prompt_work" --claude "$FAKE_CLAUDE" --prompt-file "$prompt_file" > "$prompt_output"
+assert_contains "$(cat "$prompt_output")" "fake final review"
+assert_contains "$(cat "$(job_dir_for_work "$prompt_work")/prompt.md")" "review from prompt file"
+assert_contains "$(cat "$(job_dir_for_work "$prompt_work")/metadata.json")" "\"prompt_file\": \"$prompt_file\""
+
+if FAKE_ARGS_LOG="$TMP_ROOT/prompt-file-bad.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$prompt_work" --claude "$FAKE_CLAUDE" --prompt-file "$prompt_file" -- "extra prompt" >/dev/null 2>&1; then
+  fail "--prompt-file should be mutually exclusive with prompt args"
+fi
+if FAKE_ARGS_LOG="$TMP_ROOT/prompt-file-missing.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$prompt_work" --claude "$FAKE_CLAUDE" --prompt-file "$TMP_ROOT/missing.md" >/dev/null 2>&1; then
+  fail "missing --prompt-file should fail"
+fi
+
+stdin_work="$(new_workdir stdin-prompt)"
+stdin_args="$TMP_ROOT/stdin-prompt.args"
+printf 'review from stdin\n' | FAKE_ARGS_LOG="$stdin_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$stdin_work" --claude "$FAKE_CLAUDE" > "$TMP_ROOT/stdin-prompt.out"
+assert_contains "$(cat "$TMP_ROOT/stdin-prompt.out")" "fake final review"
+assert_contains "$(cat "$(job_dir_for_work "$stdin_work")/prompt.md")" "review from stdin"
 
 timeout_work="$(new_workdir timeout)"
 timeout_args="$TMP_ROOT/timeout.args"
@@ -206,12 +283,40 @@ assert_contains "$(cat "$timeout_output")" "status=timed-out"
 timeout_status="$("$CC_WATCH" status "$(cat "$timeout_work/.cc-watch"/*/job_id)" --cwd "$timeout_work" || true)"
 assert_contains "$timeout_status" "timed-out"
 assert_contains "$timeout_status" "elapsed="
+timeout_job="$(job_id_for_work "$timeout_work")"
+set +e
+"$CC_WATCH" result "$timeout_job" --cwd "$timeout_work" > "$TMP_ROOT/timeout-result.out" 2>&1
+timeout_result_code="$?"
+set -e
+if [ "$timeout_result_code" -eq 0 ]; then
+  fail "timeout result command should return non-zero"
+fi
+if [ "$timeout_result_code" -ne 124 ]; then
+  fail "timeout result command should return 124, got $timeout_result_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "NO FINAL RESULT"
+assert_contains "$(cat "$TMP_ROOT/timeout-result.out")" "max runtime"
 
 fail_work="$(new_workdir fail)"
 fail_args="$TMP_ROOT/fail.args"
 if FAKE_ARGS_LOG="$fail_args" FAKE_BEHAVIOR=fail \
   "$CC_WATCH" run --cwd "$fail_work" --claude "$FAKE_CLAUDE" -- "review only" >/dev/null 2>&1; then
   fail "non-zero Claude run should fail"
+fi
+fail_job="$(job_id_for_work "$fail_work")"
+set +e
+"$CC_WATCH" result "$fail_job" --cwd "$fail_work" > "$TMP_ROOT/fail-result.out" 2>&1
+fail_result_code="$?"
+set -e
+if [ "$fail_result_code" -eq 0 ]; then
+  fail "fail result command should return non-zero"
+fi
+if [ "$fail_result_code" -ne 42 ]; then
+  fail "fail result command should return 42, got $fail_result_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/fail-result.out")" "fake failure"
+if "$CC_WATCH" status "$fail_job" --cwd "$fail_work" > "$TMP_ROOT/fail-status-default.out"; then
+  fail "default failed status should return non-zero"
 fi
 
 doctor_work="$(new_workdir doctor)"
@@ -249,10 +354,31 @@ cancel_job="$(FAKE_ARGS_LOG="$cancel_args" FAKE_BEHAVIOR=slow FAKE_PID_FILE="$ca
 wait_for_file "$cancel_pid_file"
 cancel_fake_pid="$(cat "$cancel_pid_file")"
 wait_for_status "$cancel_work" "$cancel_job" "running-" >/dev/null
+if ! "$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" > "$TMP_ROOT/cancel-status-default.out"; then
+  fail "default running status should return zero"
+fi
+if "$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" --strict-exit > "$TMP_ROOT/cancel-status-strict.out"; then
+  fail "strict running status should return non-zero"
+fi
 cancel_text="$("$CC_WATCH" cancel "$cancel_job" --cwd "$cancel_work")"
 assert_contains "$cancel_text" "canceled job=$cancel_job"
+cancel_dir="$(job_dir_for_work "$cancel_work")"
+assert_contains "$(cat "$cancel_dir/result.txt")" "NO FINAL RESULT"
+assert_contains "$(cat "$cancel_dir/metadata.json")" '"status": "canceled"'
 cancel_status="$("$CC_WATCH" status "$cancel_job" --cwd "$cancel_work" || true)"
 assert_contains "$cancel_status" "canceled"
+set +e
+"$CC_WATCH" result "$cancel_job" --cwd "$cancel_work" > "$TMP_ROOT/cancel-result.out" 2>&1
+cancel_result_code="$?"
+set -e
+if [ "$cancel_result_code" -eq 0 ]; then
+  fail "cancel result command should return non-zero"
+fi
+if [ "$cancel_result_code" -ne 130 ]; then
+  fail "cancel result command should return 130, got $cancel_result_code"
+fi
+assert_contains "$(cat "$TMP_ROOT/cancel-result.out")" "NO FINAL RESULT"
+assert_contains "$(cat "$TMP_ROOT/cancel-result.out")" "canceled"
 if kill -0 "$cancel_fake_pid" 2>/dev/null; then
   fail "cancel left fake Claude process alive: $cancel_fake_pid"
 fi
