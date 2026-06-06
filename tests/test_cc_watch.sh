@@ -631,6 +631,8 @@ assert_contains "$async_result" "fake final review"
 empty_list_work="$(new_workdir empty-list)"
 empty_list="$("$CC_WATCH" list --cwd "$empty_list_work")"
 [ -z "$empty_list" ] || fail "empty list should print nothing"
+empty_list_json="$("$CC_WATCH" list --cwd "$empty_list_work" --json)"
+[ "$empty_list_json" = "[]" ] || fail "empty list --json should print [], got [$empty_list_json]"
 
 state_work="$(new_workdir state-root)"
 state_parent="$state_work/custom-state"
@@ -651,6 +653,11 @@ state_result="$("$CC_WATCH" result "$state_job" --cwd "$state_work" --state-root
 assert_contains "$state_result" "fake final review"
 state_list="$("$CC_WATCH" list --cwd "$state_work" --state-root "$state_parent")"
 assert_contains "$state_list" "title=state root test"
+state_list_json="$("$CC_WATCH" list --cwd "$state_work" --state-root "$state_parent" --json)"
+printf '%s\n' "$state_list_json" > "$TMP_ROOT/state-list.json"
+assert_json_file "$TMP_ROOT/state-list.json"
+assert_contains "$state_list_json" '"title" : "state root test"'
+assert_contains "$state_list_json" "\"state_root\" : \"$state_parent/.cc-watch\""
 state_show="$("$CC_WATCH" show --cwd "$state_work" --state-root "$state_parent" --last)"
 assert_contains "$state_show" "fake final review"
 assert_contains "$(cat "$state_dir/metadata.json")" "\"state_root\": \"$state_parent/.cc-watch\""
@@ -680,6 +687,56 @@ list_text="$("$CC_WATCH" list --cwd "$async_work")"
 assert_contains "$list_text" "job=$async_job"
 assert_contains "$list_text" "status=finished"
 assert_contains "$list_text" "session_resumable=no"
+list_json="$("$CC_WATCH" list --cwd "$async_work" --json)"
+printf '%s\n' "$list_json" > "$TMP_ROOT/list.json"
+assert_json_file "$TMP_ROOT/list.json"
+assert_contains "$list_json" "\"job_id\" : \"$async_job\""
+assert_contains "$list_json" '"status" : "finished"'
+assert_contains "$list_json" '"exit_code" : 0'
+assert_contains "$list_json" '"session_resumable" : false'
+assert_contains "$list_json" "\"result_path\" : \"$async_work/.cc-watch/$async_job/result.txt\""
+assert_contains "$list_json" "\"transcript_path\" : \"$async_work/.cc-watch/$async_job/transcript.md\""
+
+order_work="$(new_workdir list-order)"
+FAKE_ARGS_LOG="$TMP_ROOT/list-order-old.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$order_work" --claude "$FAKE_CLAUDE" \
+  --title "older job" -- "review only" > "$TMP_ROOT/list-order-old.out"
+order_old_job="$(job_id_for_work "$order_work")"
+order_old_dir="$order_work/.cc-watch/$order_old_job"
+FAKE_ARGS_LOG="$TMP_ROOT/list-order-new.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$order_work" --claude "$FAKE_CLAUDE" \
+  --title "newer job" -- "review only" > "$TMP_ROOT/list-order-new.out"
+order_new_job="$(find "$order_work/.cc-watch" -maxdepth 2 -name job_id -exec cat {} \; | grep -v "^$order_old_job$")"
+order_new_dir="$order_work/.cc-watch/$order_new_job"
+printf '100\n' > "$order_old_dir/started_at"
+printf '200\n' > "$order_new_dir/started_at"
+order_json_file="$TMP_ROOT/list-order.json"
+"$CC_WATCH" list --cwd "$order_work" --json > "$order_json_file"
+assert_json_file "$order_json_file"
+perl -MJSON::PP -e '
+  local $/;
+  my $jobs = JSON::PP->new->decode(<STDIN>);
+  die "expected newest first\n" unless @$jobs == 2 && $jobs->[0]{job_id} eq $ARGV[0] && $jobs->[1]{job_id} eq $ARGV[1];
+' "$order_new_job" "$order_old_job" < "$order_json_file" || fail "list --json should be newest first"
+
+secret_list_work="$(new_workdir secret-list)"
+secret_list_args="$TMP_ROOT/secret-list.args"
+FAKE_ARGS_LOG="$secret_list_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$secret_list_work" --claude "$FAKE_CLAUDE" \
+  --title "sk-ant-secretvalue" -- "review only" > "$TMP_ROOT/secret-list.out"
+secret_list_json="$("$CC_WATCH" list --cwd "$secret_list_work" --json)"
+assert_contains "$secret_list_json" "sk-ant-REDACTED"
+assert_not_contains "$secret_list_json" "sk-ant-secretvalue"
+
+sk_path_work="$(new_workdir sk-path-secret)"
+sk_path_args="$TMP_ROOT/sk-path-secret.args"
+FAKE_ARGS_LOG="$sk_path_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$sk_path_work" --claude "$FAKE_CLAUDE" \
+  --title "path redaction guard" -- "review only" > "$TMP_ROOT/sk-path-secret.out"
+sk_path_json="$("$CC_WATCH" list --cwd "$sk_path_work" --json)"
+assert_contains "$sk_path_json" "$sk_path_work"
+assert_contains "$sk_path_json" "sk-path-secret"
+assert_not_contains "$sk_path_json" "sk-REDACTED"
 
 manage_work="$(new_workdir manage)"
 for i in 1 2 3; do
@@ -752,6 +809,11 @@ assert_contains "$(cat "$persist_dir/metadata.json")" '"session_resumable": "yes
 persist_list="$("$CC_WATCH" list --cwd "$persist_work")"
 assert_contains "$persist_list" "title=resumable thread"
 assert_contains "$persist_list" "session_resumable=yes"
+persist_list_json="$("$CC_WATCH" list --cwd "$persist_work" --json)"
+printf '%s\n' "$persist_list_json" > "$TMP_ROOT/persist-list.json"
+assert_json_file "$TMP_ROOT/persist-list.json"
+assert_contains "$persist_list_json" '"session_resumable" : true'
+assert_contains "$persist_list_json" '"session_id" : "11111111-1111-1111-1111-111111111111"'
 
 resume_args_log="$TMP_ROOT/resumable-resume.args"
 FAKE_ARGS_LOG="$resume_args_log" FAKE_BEHAVIOR=success \
@@ -813,6 +875,12 @@ cancel_job="$(FAKE_ARGS_LOG="$cancel_args" FAKE_BEHAVIOR=slow FAKE_PID_FILE="$ca
 wait_for_file "$cancel_pid_file"
 cancel_fake_pid="$(cat "$cancel_pid_file")"
 wait_for_status "$cancel_work" "$cancel_job" "running-" >/dev/null
+running_list_json="$("$CC_WATCH" list --cwd "$cancel_work" --json)"
+printf '%s\n' "$running_list_json" > "$TMP_ROOT/running-list.json"
+assert_json_file "$TMP_ROOT/running-list.json"
+assert_contains "$running_list_json" "\"job_id\" : \"$cancel_job\""
+assert_contains "$running_list_json" '"status" : "running-'
+assert_contains "$running_list_json" '"exit_code" : null'
 set +e
 "$CC_WATCH" result "$cancel_job" --cwd "$cancel_work" --json > "$TMP_ROOT/running-result.json" 2>&1
 running_result_code="$?"

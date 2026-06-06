@@ -156,6 +156,8 @@ canceled jobs. `status` returns zero for running jobs by default; use
 `--strict-exit` only when a script needs polling-style non-zero exits.
 Use `result --json` when Codex needs the metadata and final answer in one
 machine-readable object while preserving the same exit-code contract.
+Use `list --json` when Codex needs a newest-first machine-readable index of
+local jobs, including status, session resumability, timing, and archive paths.
 
 For Claude Code plugin inspection, use the read-only sibling helper:
 

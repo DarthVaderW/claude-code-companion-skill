@@ -15,7 +15,7 @@ Usage:
   cc-watch start [options] -- PROMPT
   cc-watch status <job-id> [--cwd DIR] [--state-root DIR] [--strict-exit]
   cc-watch result <job-id> [--cwd DIR] [--state-root DIR] [--json]
-  cc-watch list [--cwd DIR] [--state-root DIR]
+  cc-watch list [--cwd DIR] [--state-root DIR] [--json]
   cc-watch show [--cwd DIR] [--state-root DIR] [--last | JOB_ID | TITLE] [--transcript|--metadata|--raw]
   cc-watch resume [options] JOB_ID_OR_TITLE_OR_SESSION_ID -- PROMPT
   cc-watch cancel <job-id> [--cwd DIR] [--state-root DIR]
@@ -1703,6 +1703,7 @@ parse_list_options() {
   CWD="."
   STATE_ROOT_RAW=""
   ALLOW_EXTERNAL_STATE_ROOT=0
+  LIST_JSON=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1718,6 +1719,10 @@ parse_list_options() {
         ;;
       --allow-external-state-root)
         ALLOW_EXTERNAL_STATE_ROOT=1
+        shift
+        ;;
+      --json)
+        LIST_JSON=1
         shift
         ;;
       -h|--help)
@@ -1811,12 +1816,74 @@ job_status_word() {
   printf '%s\n' "${status_line%% *}"
 }
 
+render_list_json_from_tsv() {
+  perl -MJSON::PP -CS -e '
+    # Only redact the user-supplied title. Structural archive paths stay raw so
+    # machine consumers can open the files named by list --json.
+    sub redact {
+      my ($value) = @_;
+      return undef unless defined $value;
+      $value =~ s/((?:Proxy-)?Authorization:[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:]]+/${1}REDACTED/gi;
+      $value =~ s/((?:x-api-key|api-key):[[:space:]]*)[^[:space:]]+/${1}REDACTED/gi;
+      $value =~ s/\bsk-ant-[A-Za-z0-9._-]+/sk-ant-REDACTED/g;
+      $value =~ s/\bsk-(?!ant-)[A-Za-z0-9._-]+/sk-REDACTED/g;
+      $value =~ s/([?&](?:token|key|api_key|access_token|auth_token)=)[^&[:space:]]+/${1}REDACTED/gi;
+      $value =~ s/\b((?:ANTHROPIC_[A-Z0-9_]*|CLAUDE_CODE_OAUTH_TOKEN|(?:HTTP|HTTPS|ALL|NO)_PROXY|(?:http|https|all|no)_proxy)=)[^[:space:]]+/${1}REDACTED/g;
+      return $value;
+    }
+    sub optional_string {
+      my ($value) = @_;
+      return undef unless defined $value && length $value;
+      return $value;
+    }
+    sub optional_redacted_string {
+      my ($value) = @_;
+      return undef unless defined $value && length $value;
+      return redact($value);
+    }
+    sub optional_int {
+      my ($value) = @_;
+      return undef unless defined $value && $value =~ /^-?\d+$/;
+      return 0 + $value;
+    }
+    my @jobs;
+    while (my $line = <STDIN>) {
+      chomp $line;
+      next unless length $line;
+      my @f = split /\x1f/, $line, -1;
+      next unless @f >= 14;
+      my %job = (
+        job_id => $f[1],
+        status => $f[2],
+        elapsed_seconds => 0 + $f[3],
+        title => optional_redacted_string($f[4]),
+        session_id => optional_string($f[5]),
+        session_resumable => $f[6] eq "yes" ? JSON::PP::true : JSON::PP::false,
+        cwd => $f[7],
+        state_root => $f[8],
+        started_at => 0 + $f[9],
+        finished_at => optional_int($f[10]),
+        exit_code => optional_int($f[11]),
+        result_path => $f[12],
+        transcript_path => $f[13],
+      );
+      push @jobs, \%job;
+    }
+    print JSON::PP->new->ascii(0)->canonical->pretty->encode(\@jobs);
+  '
+}
+
 cmd_list() {
   parse_list_options "$@"
 
   local root dir job title session no_session_persistence session_resumable status elapsed started
+  local cwd state_root finished exit_code result_path transcript_path sep
   root="$STATE_ROOT"
-  [ -d "$root" ] || return 0
+  if [ ! -d "$root" ]; then
+    [ "$LIST_JSON" = "1" ] && printf '[]' && printf '\n'
+    return 0
+  fi
+  sep="$(printf '\037')"
 
   for dir in "$root"/*/; do
     [ -f "$dir/job_id" ] || continue
@@ -1833,11 +1900,31 @@ cmd_list() {
     status="$(job_status_word)"
     elapsed="$(job_elapsed_seconds)"
     started="$(job_started_at_or_zero "$JOB_DIR")"
-    [ -n "$title" ] || title="-"
-    [ -n "$session" ] || session="-"
-    printf '%s\tjob=%s status=%s elapsed=%s title=%s session_id=%s session_resumable=%s\n' \
-      "$started" "$job" "$status" "$elapsed" "$title" "$session" "$session_resumable"
-  done | sort -rn | cut -f2-
+    cwd="$(read_file "$JOB_DIR/cwd")"
+    state_root="$(read_file "$JOB_DIR/state_root")"
+    finished="$(read_file "$JOB_DIR/finished_at")"
+    exit_code=""
+    if terminal_status "$(read_file "$JOB_DIR/status")"; then
+      exit_code="$(status_exit_code)"
+    fi
+    result_path="$JOB_DIR/result.txt"
+    transcript_path="$JOB_DIR/transcript.md"
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
+      "$started" "$job" "$status" "$elapsed" "$title" "$session" "$session_resumable" \
+      "$cwd" "$state_root" "$started" "$finished" "$exit_code" "$result_path" "$transcript_path"
+  done | LC_ALL=C sort -t "$sep" -k1,1nr -k2,2r | {
+    if [ "$LIST_JSON" = "1" ]; then
+      render_list_json_from_tsv
+    else
+      while IFS="$sep" read -r started job status elapsed title session session_resumable cwd state_root started_again finished exit_code result_path transcript_path; do
+        [ -n "$job" ] || continue
+        [ -n "$title" ] || title="-"
+        [ -n "$session" ] || session="-"
+        printf 'job=%s status=%s elapsed=%s title=%s session_id=%s session_resumable=%s\n' \
+          "$job" "$status" "$elapsed" "$title" "$session" "$session_resumable"
+      done
+    fi
+  }
 }
 
 parse_show_options() {

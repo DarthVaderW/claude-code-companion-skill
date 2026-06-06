@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `cc-watch list --json` for machine-readable, newest-first job indexes
+  with status, session, timing, and archive path fields.
+
 ## v0.5.1 - 2026-06-07
 
 - Add `cc-watch review-diff` to build a read-only review prompt from tracked
