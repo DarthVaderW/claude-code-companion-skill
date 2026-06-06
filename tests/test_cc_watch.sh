@@ -51,6 +51,13 @@ case "${FAKE_BEHAVIOR:-success}" in
     printf 'fake failure\n' >&2
     exit 42
     ;;
+  partial-fail)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Partial useful review before the socket failed. Keep this paragraph visible."}]}}'
+    printf '%s\n' '{"type":"system","message":"permission denied: tool Write is not allowed by cc-watch"}'
+    printf 'Permission denied for tool Write before final result.\n' >&2
+    exit 42
+    ;;
   secret-success)
     printf 'stderr Authorization: Bearer STDERRSECRET Proxy-Authorization: Basic PROXYSECRET sk-ant-stderrsecret ANTHROPIC_API_KEY=stderr-secret http_proxy=http://user:pass@proxy\n' >&2
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
@@ -380,6 +387,30 @@ assert_json_file "$(job_dir_for_work "$fail_work")/metadata.json"
 if "$CC_WATCH" status "$fail_job" --cwd "$fail_work" > "$TMP_ROOT/fail-status-default.out"; then
   fail "default failed status should return non-zero"
 fi
+
+partial_fail_work="$(new_workdir partial-fail)"
+partial_fail_args="$TMP_ROOT/partial-fail.args"
+set +e
+FAKE_ARGS_LOG="$partial_fail_args" FAKE_BEHAVIOR=partial-fail \
+  "$CC_WATCH" run --cwd "$partial_fail_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/partial-fail-run.out" 2>&1
+partial_fail_code="$?"
+set -e
+if [ "$partial_fail_code" -ne 42 ]; then
+  fail "partial-fail run should return 42, got $partial_fail_code"
+fi
+partial_fail_dir="$(job_dir_for_work "$partial_fail_work")"
+partial_fail_result="$(cat "$partial_fail_dir/result.txt")"
+partial_fail_transcript="$(cat "$partial_fail_dir/transcript.md")"
+partial_fail_metadata="$(cat "$partial_fail_dir/metadata.md")"
+assert_contains "$partial_fail_result" "## Warnings"
+assert_contains "$partial_fail_result" "permission denied: tool Write is not allowed"
+assert_contains "$partial_fail_result" "## Last assistant text before failure"
+assert_contains "$partial_fail_result" "Partial useful review before the socket failed"
+assert_contains "$partial_fail_transcript" "Last assistant text before failure"
+assert_contains "$partial_fail_transcript" "Partial useful review before the socket failed"
+assert_contains "$partial_fail_metadata" "## Warnings"
+assert_contains "$partial_fail_metadata" "Permission denied for tool Write"
+assert_json_file "$partial_fail_dir/metadata.json"
 
 secret_work="$(new_workdir secret-success)"
 secret_args="$TMP_ROOT/secret-success.args"

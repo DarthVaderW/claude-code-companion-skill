@@ -18,6 +18,8 @@ Resolved after `v0.3.0`:
   write a catch-all `.gitignore` into a user-owned parent directory.
 - `cc-plugin` was added as a read-only sibling for Claude Code plugin
   `doctor`, `list`, `versions`, and dry-run `plan-update` checks.
+- Failed jobs now surface denied/disallowed tool warnings and the last
+  assistant text seen before a missing final result.
 
 Resolved in `v0.3.0`:
 
@@ -37,21 +39,17 @@ Resolved in `v0.3.0`:
 
 ## Still Open
 
-1. Extract and show a small "last assistant text before failure" excerpt when a
-   job fails before a final result event.
-2. Summarize denied tool requests as first-class warnings in `metadata.md` and
-   `result.txt`.
-3. Add more `doctor` guidance for custom state roots if real-world usage shows
+1. Add more `doctor` guidance for custom state roots if real-world usage shows
    confusing archive locations.
-4. Add job management helpers such as `prune` or `archive`.
-5. Consider an optional heartbeat for long foreground `run` jobs so Codex can
+2. Add job management helpers such as `prune` or `archive`.
+3. Consider an optional heartbeat for long foreground `run` jobs so Codex can
    distinguish slow progress from silence.
-6. Document the release and install/update path for GitHub-tagged skill
+4. Document the release and install/update path for GitHub-tagged skill
    installs separately from local symlink development installs.
-7. Keep mutating Claude plugin operations out of `cc-watch`. If a future
+5. Keep mutating Claude plugin operations out of `cc-watch`. If a future
    `cc-plugin update` is added, it must require explicit plugin names, `--yes`,
    and a clear warning that it writes global `~/.claude` plugin state.
-8. Defer MCP smoke checks until there is an explicit read-only MCP allowlist and
+6. Defer MCP smoke checks until there is an explicit read-only MCP allowlist and
    a proven need. Prompt text alone is not a write guard.
 
 ## Origin

@@ -89,8 +89,10 @@ Each job directory keeps both human-readable and raw evidence:
 
 `result.txt` is guaranteed for terminal jobs. On success it contains Claude's
 final answer. On `failed`, `timed-out`, or `canceled`, it contains a status
-header plus `NO FINAL RESULT`, the reason, stderr tail, and raw stream tail when
-available. Treat `stdout.jsonl` as the lossless source of truth and
+header plus `NO FINAL RESULT`, the reason, denied/disallowed tool warnings when
+detected, the last assistant text seen before failure when available, stderr
+tail, and raw stream tail when available. Treat `stdout.jsonl` as the lossless
+source of truth and
 `result.txt` as the convenient human entry point. Use `transcript.md` when a
 future Codex thread or CLI user needs to read the prompt and answer together.
 

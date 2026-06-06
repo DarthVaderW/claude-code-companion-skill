@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add failure diagnostics to `cc-watch` archives: denied/disallowed tool
+  warnings and the last assistant text seen before a missing final result.
 - Add best-effort redaction for human-readable `cc-watch` outputs while keeping
   raw `stdout.jsonl` as local lossless evidence.
 - Add `--state-root` and `--allow-external-state-root` so archives can be stored

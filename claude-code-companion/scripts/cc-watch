@@ -601,9 +601,107 @@ wait_for_result_archive() {
   return 1
 }
 
+extract_last_assistant_text() {
+  local stdout_log="$1"
+  [ -s "$stdout_log" ] || return 0
+  perl -MJSON::PP -CS -e '
+    my $path = shift;
+    open my $fh, "<:encoding(UTF-8)", $path or exit 0;
+    my $json = JSON::PP->new;
+    my $last = "";
+
+    sub collect_text {
+      my ($value, $out) = @_;
+      if (ref($value) eq "HASH") {
+        if (exists $value->{text} && !ref($value->{text}) && $value->{text} =~ /\S/) {
+          push @$out, $value->{text};
+        }
+        for my $key (qw(message content delta result)) {
+          collect_text($value->{$key}, $out) if exists $value->{$key};
+        }
+      } elsif (ref($value) eq "ARRAY") {
+        collect_text($_, $out) for @$value;
+      }
+    }
+
+    while (my $line = <$fh>) {
+      my $event = eval { $json->decode($line) };
+      next unless $event;
+      my $type = $event->{type} // "";
+      next unless $type =~ /assistant|message|content/i || exists $event->{message};
+      my @text;
+      collect_text($event, \@text);
+      my $joined = join "\n", grep { /\S/ } @text;
+      $last = $joined if $joined =~ /\S/;
+    }
+
+    $last =~ s/\A\s+//;
+    $last =~ s/\s+\z//;
+    if (length($last) > 1200) {
+      $last = "... " . substr($last, -1196);
+    }
+    print $last if $last =~ /\S/;
+  ' "$stdout_log"
+}
+
+extract_denied_tool_warnings() {
+  local stdout_log="$1"
+  local stderr_log="$2"
+  perl -MJSON::PP -CS -e '
+    my @paths = @ARGV;
+    my $json = JSON::PP->new;
+    my %seen;
+    my @warnings;
+
+    sub collect_strings {
+      my ($value, $out) = @_;
+      if (ref($value) eq "HASH") {
+        for my $key (qw(name tool_name text message error result subtype type)) {
+          push @$out, "$key=$value->{$key}" if exists $value->{$key} && !ref($value->{$key});
+        }
+        collect_strings($_, $out) for values %$value;
+      } elsif (ref($value) eq "ARRAY") {
+        collect_strings($_, $out) for @$value;
+      } elsif (defined $value && !ref($value)) {
+        push @$out, $value;
+      }
+    }
+
+    for my $path (@paths) {
+      next unless defined $path && -s $path;
+      open my $fh, "<:encoding(UTF-8)", $path or next;
+      while (my $line = <$fh>) {
+        chomp $line;
+        my @candidates;
+        my $event = eval { $json->decode($line) };
+        if ($event) {
+          collect_strings($event, \@candidates);
+        } else {
+          push @candidates, $line;
+        }
+        for my $candidate (@candidates) {
+          next unless defined $candidate;
+          next unless $candidate =~ /(denied|disallowed|not allowed|permission)/i;
+          $candidate =~ s/\s+/ /g;
+          $candidate =~ s/\A\s+//;
+          $candidate =~ s/\s+\z//;
+          next unless length $candidate;
+          $candidate = substr($candidate, 0, 300) . "..." if length($candidate) > 300;
+          next if $seen{$candidate}++;
+          push @warnings, $candidate;
+          last if @warnings >= 8;
+        }
+        last if @warnings >= 8;
+      }
+      last if @warnings >= 8;
+    }
+    print join("", map { "- $_\n" } @warnings);
+  ' "$stdout_log" "$stderr_log"
+}
+
 render_transcript() {
   local reason="$1"
-  local status exit_code elapsed session title resumed_from prompt_file result_text_file stderr_log
+  local status exit_code elapsed session title resumed_from prompt_file result_text_file stderr_log stdout_log
   status="$(read_file "$JOB_DIR/status")"
   exit_code="$(status_exit_code)"
   elapsed="$(job_elapsed_seconds)"
@@ -613,6 +711,7 @@ render_transcript() {
   prompt_file="$JOB_DIR/prompt.md"
   result_text_file="$JOB_DIR/final-text.txt"
   stderr_log="$JOB_DIR/stderr.log"
+  stdout_log="$JOB_DIR/stdout.jsonl"
 
   printf '# cc-watch transcript\n\n'
   printf '## Job\n\n'
@@ -650,6 +749,13 @@ render_transcript() {
     printf '(Claude returned an empty final result.)\n'
   else
     printf 'NO FINAL RESULT\n'
+    local last_assistant_text
+    last_assistant_text="$(extract_last_assistant_text "$stdout_log")"
+    if [ -n "$last_assistant_text" ]; then
+      printf '\n## Last assistant text before failure\n\n```text\n'
+      printf '%s\n' "$last_assistant_text"
+      printf '```\n'
+    fi
   fi
 
   if [ -s "$stderr_log" ]; then
@@ -667,7 +773,7 @@ write_transcript_file() {
 }
 
 write_metadata_files() {
-  local status exit_code started_at finished_at elapsed session session_resumable title resumed_from target_repo
+  local status exit_code started_at finished_at elapsed session session_resumable title resumed_from target_repo warnings
   status="$(read_file "$JOB_DIR/status")"
   exit_code="$(status_exit_code)"
   started_at="$(read_file "$JOB_DIR/started_at")"
@@ -677,6 +783,7 @@ write_metadata_files() {
   title="$(read_file "$JOB_DIR/title")"
   resumed_from="$(read_file "$JOB_DIR/resumed_from")"
   target_repo="$(target_repo_summary)"
+  warnings="$(extract_denied_tool_warnings "$JOB_DIR/stdout.jsonl" "$JOB_DIR/stderr.log")"
   session_resumable=no
   if [ -n "$session" ] && [ "$(read_file "$JOB_DIR/no_session_persistence")" != "1" ]; then
     session_resumable=yes
@@ -733,6 +840,10 @@ write_metadata_files() {
     if [ -n "$resumed_from" ]; then
       printf '%s\n' "- resumed_from: \`$resumed_from\`"
     fi
+    if [ -n "$warnings" ]; then
+      printf '\n## Warnings\n\n'
+      printf '%s' "$warnings"
+    fi
   } | redact_stream > "$tmp_md"
   mv "$tmp_md" "$JOB_DIR/metadata.md"
 }
@@ -784,6 +895,18 @@ write_result_archive() {
       printf 'NO FINAL RESULT\n\n'
       if [ -n "$reason" ]; then
         printf '%s\n\n' "$reason"
+      fi
+      local warnings last_assistant_text
+      warnings="$(extract_denied_tool_warnings "$stdout_log" "$stderr_log")"
+      if [ -n "$warnings" ]; then
+        printf '## Warnings\n\n'
+        printf '%s\n' "$warnings"
+      fi
+      last_assistant_text="$(extract_last_assistant_text "$stdout_log")"
+      if [ -n "$last_assistant_text" ]; then
+        printf '## Last assistant text before failure\n\n```text\n'
+        printf '%s\n' "$last_assistant_text"
+        printf '\n```\n\n'
       fi
       if [ -s "$stderr_log" ]; then
         printf '## stderr tail\n\n```text\n'

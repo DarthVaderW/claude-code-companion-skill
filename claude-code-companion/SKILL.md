@@ -122,10 +122,11 @@ Treat `result.txt` as the human-readable archive entry, `transcript.md` as the
 prompt-plus-answer view for future reading, and `stdout.jsonl` as the local
 lossless raw evidence. Human-readable outputs are best-effort redacted for
 secret-shaped strings; do not rely on redaction as a reason to enable MCP or
-print environment values. `result` prints `result.txt` for any terminal job and exits
-non-zero for failed, timed-out, or canceled jobs. `status` returns zero for
-running jobs by default; use `--strict-exit` only when a script needs
-polling-style non-zero exits.
+print environment values. Failed jobs include denied/disallowed tool warnings
+and the last assistant text before failure when available. `result` prints
+`result.txt` for any terminal job and exits non-zero for failed, timed-out, or
+canceled jobs. `status` returns zero for running jobs by default; use
+`--strict-exit` only when a script needs polling-style non-zero exits.
 
 For Claude Code plugin inspection, use the read-only sibling helper:
 
