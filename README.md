@@ -108,6 +108,7 @@ claude-code-companion/scripts/cc-watch prune --cwd . --keep 10
 claude-code-companion/scripts/cc-watch prune --cwd . --keep 10 --yes
 claude-code-companion/scripts/cc-watch repair-stale --cwd .
 claude-code-companion/scripts/cc-watch repair-stale --cwd . --yes
+claude-code-companion/scripts/cc-watch repair-stale --cwd . --json
 ```
 
 `archive` writes a tarball under `.cc-watch/archives/`. `prune` never removes
@@ -121,7 +122,16 @@ when no worker, Claude, or watchdog process is alive. Recent no-PID `starting`
 jobs are skipped for 30 seconds by default; adjust with `--grace-seconds N`.
 In `--yes` output, `selected=N` is the pre-repair candidate count; `repaired=N`
 can be lower if the command re-checks a job and finds that it became terminal
-or live again before mutation.
+or live again before mutation. Use `--json` when another script or Codex needs
+the candidate list and repair result as structured data.
+
+`repair-stale --json` returns a single object with `dry_run`,
+`selected_count`, `repaired_count`, `state_root`, `grace_seconds`, `records`,
+and `apply_records`. `records` is the pre-check snapshot and may include both
+`selected` and `skipped` jobs. `apply_records` is populated only during
+`--yes`, and only for jobs that were originally selected for the final safety
+re-check; it can contain `repaired` or `skipped` outcomes such as
+`changed-before-repair`.
 
 Runtime state for async jobs is written under the target working directory by
 default:
@@ -264,7 +274,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.4
+  --ref v0.5.5
 ```
 
 Restart Codex after installing or updating skills.

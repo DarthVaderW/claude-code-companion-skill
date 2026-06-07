@@ -904,10 +904,39 @@ repair_live_text="$("$CC_WATCH" repair-stale --cwd "$running_prune_work" --yes)"
 assert_contains "$repair_live_text" "cc-watch repair-stale dry_run=no selected=0"
 assert_contains "$repair_live_text" "skipped job=$running_prune_job"
 assert_contains "$repair_live_text" "reason=process-alive"
+repair_live_json="$("$CC_WATCH" repair-stale --cwd "$running_prune_work" --json --yes)"
+printf '%s\n' "$repair_live_json" > "$TMP_ROOT/repair-stale-live.json"
+assert_json_file "$TMP_ROOT/repair-stale-live.json"
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "selected count mismatch\n" unless $payload->{selected_count} == 0;
+  die "repaired count mismatch\n" unless $payload->{repaired_count} == 0;
+  die "records mismatch\n" unless @{$payload->{records}} == 1;
+  die "apply records should be empty\n" unless @{$payload->{apply_records}} == 0;
+  my $record = $payload->{records}[0];
+  die "job mismatch\n" unless $record->{job_id} eq $ARGV[0];
+  die "kind mismatch\n" unless $record->{kind} eq "skipped";
+  die "reason mismatch\n" unless $record->{reason} eq "process-alive";
+' "$running_prune_job" < "$TMP_ROOT/repair-stale-live.json" || fail "repair-stale live --json payload mismatch"
 running_prune_text="$("$CC_WATCH" prune --cwd "$running_prune_work" --all-terminal --yes)"
 assert_contains "$running_prune_text" "pruned=1"
 [ -d "$running_prune_work/.cc-watch/$running_prune_job" ] || fail "running job should survive prune --all-terminal"
 "$CC_WATCH" cancel "$running_prune_job" --cwd "$running_prune_work" >/dev/null
+
+repair_empty_work="$(new_workdir repair-stale-empty)"
+repair_empty_json="$("$CC_WATCH" repair-stale --cwd "$repair_empty_work" --json)"
+printf '%s\n' "$repair_empty_json" > "$TMP_ROOT/repair-stale-empty.json"
+assert_json_file "$TMP_ROOT/repair-stale-empty.json"
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "dry_run should be true\n" unless $payload->{dry_run};
+  die "selected count mismatch\n" unless $payload->{selected_count} == 0;
+  die "repaired count mismatch\n" unless $payload->{repaired_count} == 0;
+  die "records should be empty\n" unless @{$payload->{records}} == 0;
+  die "apply records should be empty\n" unless @{$payload->{apply_records}} == 0;
+' < "$TMP_ROOT/repair-stale-empty.json" || fail "repair-stale empty --json payload mismatch"
 
 repair_work="$(new_workdir repair-stale)"
 FAKE_ARGS_LOG="$TMP_ROOT/repair-stale.args" FAKE_BEHAVIOR=success \
@@ -920,6 +949,22 @@ repair_dry="$("$CC_WATCH" repair-stale --cwd "$repair_work")"
 assert_contains "$repair_dry" "cc-watch repair-stale dry_run=yes selected=1"
 assert_contains "$repair_dry" "selected job=$repair_job"
 assert_contains "$repair_dry" "reason=dead-pids"
+repair_dry_json="$("$CC_WATCH" repair-stale --cwd "$repair_work" --json)"
+printf '%s\n' "$repair_dry_json" > "$TMP_ROOT/repair-stale-dry.json"
+assert_json_file "$TMP_ROOT/repair-stale-dry.json"
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "dry_run should be true\n" unless $payload->{dry_run};
+  die "selected count mismatch\n" unless $payload->{selected_count} == 1;
+  die "repaired count mismatch\n" unless $payload->{repaired_count} == 0;
+  die "records mismatch\n" unless @{$payload->{records}} == 1;
+  die "apply records should be empty\n" unless @{$payload->{apply_records}} == 0;
+  my $record = $payload->{records}[0];
+  die "job mismatch\n" unless $record->{job_id} eq $ARGV[0];
+  die "kind mismatch\n" unless $record->{kind} eq "selected";
+  die "reason mismatch\n" unless $record->{reason} eq "dead-pids";
+' "$repair_job" < "$TMP_ROOT/repair-stale-dry.json" || fail "repair-stale --json dry-run payload mismatch"
 [ "$(cat "$repair_dir/status")" = "running-quiet" ] || fail "repair-stale dry-run mutated status"
 repair_yes="$("$CC_WATCH" repair-stale --cwd "$repair_work" --yes)"
 assert_contains "$repair_yes" "cc-watch repair-stale dry_run=no selected=1"
@@ -985,6 +1030,58 @@ assert_contains "$repair_missing_status" "repaired=1"
 if "$CC_WATCH" repair-stale --cwd "$repair_missing_status_work" --grace-seconds nope >/dev/null 2>&1; then
   fail "repair-stale --grace-seconds with a non-integer should fail"
 fi
+
+repair_json_work="$(new_workdir repair-stale-json-apply)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-json-apply.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_json_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-json-apply.out"
+repair_json_job="$(job_id_for_work "$repair_json_work")"
+repair_json_dir="$(job_dir_for_work "$repair_json_work")"
+mark_job_stale "$repair_json_dir" "running-quiet" "2147483647" "" "" "1"
+repair_apply_json="$("$CC_WATCH" repair-stale --cwd "$repair_json_work" --json --yes)"
+printf '%s\n' "$repair_apply_json" > "$TMP_ROOT/repair-stale-apply.json"
+assert_json_file "$TMP_ROOT/repair-stale-apply.json"
+assert_not_contains "$repair_apply_json" "repaired job="
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "dry_run should be false\n" if $payload->{dry_run};
+  die "selected count mismatch\n" unless $payload->{selected_count} == 1;
+  die "repaired count mismatch\n" unless $payload->{repaired_count} == 1;
+  die "apply records mismatch\n" unless @{$payload->{apply_records}} == 1;
+  my $record = $payload->{apply_records}[0];
+  die "job mismatch\n" unless $record->{job_id} eq $ARGV[0];
+  die "kind mismatch\n" unless $record->{kind} eq "repaired";
+  die "status mismatch\n" unless $record->{status} eq "failed";
+  die "reason mismatch\n" unless $record->{reason} eq "dead-pids";
+' "$repair_json_job" < "$TMP_ROOT/repair-stale-apply.json" || fail "repair-stale --json --yes payload mismatch"
+[ "$(cat "$repair_json_dir/status")" = "failed" ] || fail "repair-stale --json --yes should mark job failed"
+
+repair_json_multi_work="$(new_workdir repair-stale-json-multi)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-json-multi-a.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_json_multi_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-json-multi-a.out"
+repair_json_multi_a_job="$(job_id_for_work "$repair_json_multi_work")"
+repair_json_multi_a_dir="$repair_json_multi_work/.cc-watch/$repair_json_multi_a_job"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-json-multi-b.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_json_multi_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-json-multi-b.out"
+repair_json_multi_b_job="$(find "$repair_json_multi_work/.cc-watch" -maxdepth 2 -name job_id -exec cat {} \; | grep -v "^$repair_json_multi_a_job$")"
+repair_json_multi_b_dir="$repair_json_multi_work/.cc-watch/$repair_json_multi_b_job"
+mark_job_stale "$repair_json_multi_a_dir" "running-quiet" "2147483647" "" "" "1"
+mark_job_stale "$repair_json_multi_b_dir" "running-quiet" "2147483647" "" "" "1"
+repair_multi_json="$("$CC_WATCH" repair-stale --cwd "$repair_json_multi_work" --json --yes)"
+printf '%s\n' "$repair_multi_json" > "$TMP_ROOT/repair-stale-multi.json"
+assert_json_file "$TMP_ROOT/repair-stale-multi.json"
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "selected count mismatch\n" unless $payload->{selected_count} == 2;
+  die "repaired count mismatch\n" unless $payload->{repaired_count} == 2;
+  die "records mismatch\n" unless @{$payload->{records}} == 2;
+  die "apply records mismatch\n" unless @{$payload->{apply_records}} == 2;
+  my %seen = map { $_->{job_id} => $_->{kind} } @{$payload->{apply_records}};
+  die "first job missing\n" unless ($seen{$ARGV[0]} // "") eq "repaired";
+  die "second job missing\n" unless ($seen{$ARGV[1]} // "") eq "repaired";
+' "$repair_json_multi_a_job" "$repair_json_multi_b_job" < "$TMP_ROOT/repair-stale-multi.json" \
+  || fail "repair-stale --json multi-job payload mismatch"
 
 repair_shared_parent="$TMP_ROOT/repair-shared-state"
 repair_shared_a_work="$(new_workdir repair-shared-a)"

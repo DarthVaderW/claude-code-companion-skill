@@ -190,6 +190,7 @@ scripts/cc-watch prune --cwd . --keep 10
 scripts/cc-watch prune --cwd . --keep 10 --yes
 scripts/cc-watch repair-stale --cwd .
 scripts/cc-watch repair-stale --cwd . --yes
+scripts/cc-watch repair-stale --cwd . --json
 ```
 
 `prune` never removes running jobs, and `prune --yes` requires an explicit
@@ -198,7 +199,10 @@ selector such as `--keep`, `--older-than-days`, or `--all-terminal`.
 whose worker, Claude, and watchdog processes have all died. It writes a failed
 result archive with `--yes`; it never deletes job directories or kills PIDs.
 `selected` is counted before the final safety re-check, so `repaired` may be
-lower if a job changes state during the command.
+lower if a job changes state during the command. Use `--json` for structured
+cleanup reports. In JSON output, `records` is the pre-check snapshot and
+`apply_records` contains only `--yes` outcomes for jobs that reached the final
+safety re-check.
 
 ## MCP Reading
 

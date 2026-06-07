@@ -23,7 +23,7 @@ Usage:
   cc-watch cancel <job-id> [--cwd DIR] [--state-root DIR]
   cc-watch archive [--cwd DIR] [--state-root DIR] [--older-than-days N] [--keep N] [--all-terminal] [--yes]
   cc-watch prune [--cwd DIR] [--state-root DIR] [--older-than-days N|--keep N|--all-terminal] [--yes]
-  cc-watch repair-stale [--cwd DIR] [--state-root DIR] [--grace-seconds N] [--yes]
+  cc-watch repair-stale [--cwd DIR] [--state-root DIR] [--grace-seconds N] [--yes] [--json]
   cc-watch doctor [options]
 
 Options:
@@ -41,6 +41,8 @@ Options:
                         --yes, these commands are dry-run.
   --grace-seconds N     For repair-stale, skip recent no-PID starting jobs
                         younger than N seconds. Default: 30.
+  --json                Emit machine-readable JSON for result, list, findings,
+                        or repair-stale where supported.
   --title TITLE         Human-readable local job title. Not passed to Claude.
   --effort LEVEL        Claude effort level. Default: max.
   --model MODEL         Optional Claude model.
@@ -2710,6 +2712,7 @@ parse_repair_stale_options() {
   ALLOW_EXTERNAL_STATE_ROOT=0
   REPAIR_STALE_YES=0
   REPAIR_STALE_GRACE_SECONDS="$REPAIR_STALE_GRACE_SECONDS_DEFAULT"
+  REPAIR_STALE_JSON=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2735,6 +2738,10 @@ parse_repair_stale_options() {
         ;;
       --yes)
         REPAIR_STALE_YES=1
+        shift
+        ;;
+      --json)
+        REPAIR_STALE_JSON=1
         shift
         ;;
       -h|--help)
@@ -2795,6 +2802,56 @@ classify_repair_stale_job() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$dir" "$job" "$status" "$started_at" "$reason"
 }
 
+render_repair_stale_json() {
+  local records="$1"
+  local apply_records="$2"
+  local selected_count="$3"
+  local repaired_count="$4"
+  local dry_run
+  [ "$REPAIR_STALE_YES" = "1" ] && dry_run=false || dry_run=true
+  {
+    printf '%s\n' "$records"
+    printf '\036\n'
+    printf '%s\n' "$apply_records"
+  } | perl -MJSON::PP -CS -e '
+    my ($dry_run, $selected_count, $repaired_count, $state_root, $grace_seconds) = @ARGV;
+    my @records;
+    my @apply_records;
+    my $target = \@records;
+    while (my $line = <STDIN>) {
+      chomp $line;
+      if ($line eq "\x1e") {
+        $target = \@apply_records;
+        next;
+      }
+      next unless length $line;
+      my @f = split /\t/, $line, -1;
+      next unless @f >= 6;
+      my $status = $f[3];
+      $status = undef if !defined($status) || $status eq "-";
+      my %record = (
+        kind => $f[0],
+        dir => $f[1],
+        job_id => $f[2],
+        status => $status,
+        started_at => ($f[4] =~ /^\d+$/ ? 0 + $f[4] : 0),
+        reason => $f[5],
+      );
+      push @$target, \%record;
+    }
+    my %payload = (
+      dry_run => $dry_run eq "true" ? JSON::PP::true : JSON::PP::false,
+      selected_count => 0 + $selected_count,
+      repaired_count => 0 + $repaired_count,
+      state_root => $state_root,
+      grace_seconds => 0 + $grace_seconds,
+      records => \@records,
+      apply_records => \@apply_records,
+    );
+    print JSON::PP->new->ascii(0)->canonical->pretty->encode(\%payload);
+  ' "$dry_run" "$selected_count" "$repaired_count" "$STATE_ROOT" "$REPAIR_STALE_GRACE_SECONDS"
+}
+
 list_repair_stale_records() {
   [ -d "$STATE_ROOT" ] || return 0
   local dir
@@ -2807,14 +2864,25 @@ list_repair_stale_records() {
 repair_stale_selected_job() {
   local dir="$1"
   local reason="$2"
-  local current kind job status started_at rechecked_reason
+  local current kind job status started_at rechecked_reason original_dir original_job original_status
+  REPAIR_STALE_LAST_APPLY_RECORD=""
+  original_dir="$dir"
+  original_job="$(read_file "$dir/job_id")"
   current="$(classify_repair_stale_job "$dir" || true)"
-  [ -n "$current" ] || return 2
+  if [ -z "$current" ]; then
+    [ -n "$original_job" ] || original_job="-"
+    original_status="$(read_file "$original_dir/status")"
+    [ -n "$original_status" ] || original_status="-"
+    REPAIR_STALE_LAST_APPLY_RECORD="$(printf 'skipped\t%s\t%s\t%s\t0\tchanged-before-repair\n' "$original_dir" "$original_job" "$original_status")"
+    [ "$REPAIR_STALE_JSON" = "1" ] || printf 'skipped job=%s status=%s reason=changed-before-repair dir=%s\n' "$original_job" "$original_status" "$original_dir"
+    return 2
+  fi
   IFS="$(printf '\t')" read -r kind dir job status started_at rechecked_reason <<EOF
 $current
 EOF
   if [ "$kind" != "selected" ]; then
-    printf 'skipped job=%s status=%s reason=%s dir=%s\n' "$job" "$status" "$rechecked_reason" "$dir"
+    REPAIR_STALE_LAST_APPLY_RECORD="$(printf 'skipped\t%s\t%s\t%s\t%s\t%s\n' "$dir" "$job" "$status" "$started_at" "$rechecked_reason")"
+    [ "$REPAIR_STALE_JSON" = "1" ] || printf 'skipped job=%s status=%s reason=%s dir=%s\n' "$job" "$status" "$rechecked_reason" "$dir"
     return 2
   fi
 
@@ -2825,20 +2893,25 @@ EOF
   write_file "$JOB_DIR/finished_at" "$(now_epoch)" || die "cannot write repaired finished_at: $JOB_DIR"
   write_result_archive "Claude job was repaired as failed because repair-stale found no live worker, Claude, or watchdog process (reason=$reason)." \
     || die "cannot write repaired result archive: $JOB_DIR"
-  printf 'repaired job=%s status=failed reason=%s dir=%s\n' "$JOB_ID" "$reason" "$JOB_DIR"
+  REPAIR_STALE_LAST_APPLY_RECORD="$(printf 'repaired\t%s\t%s\tfailed\t%s\t%s\n' "$JOB_DIR" "$JOB_ID" "$started_at" "$reason")"
+  [ "$REPAIR_STALE_JSON" = "1" ] || printf 'repaired job=%s status=failed reason=%s dir=%s\n' "$JOB_ID" "$reason" "$JOB_DIR"
 }
 
 cmd_repair_stale() {
   parse_repair_stale_options "$@"
 
-  local records selected_count kind dir job status started_at reason repaired
+  local records apply_records selected_count kind dir job status started_at reason repaired
   records="$(list_repair_stale_records)"
   selected_count="$(printf '%s\n' "$records" | awk -F '\t' '$1 == "selected" && $3 != "" { c++ } END { print c + 0 }')"
-  printf 'cc-watch repair-stale dry_run=%s selected=%s state_root=%s grace_seconds=%s\n' \
-    "$([ "$REPAIR_STALE_YES" = "1" ] && printf no || printf yes)" \
-    "$selected_count" "$STATE_ROOT" "$REPAIR_STALE_GRACE_SECONDS"
+  apply_records=""
 
-  if [ -n "$records" ]; then
+  if [ "$REPAIR_STALE_JSON" != "1" ]; then
+    printf 'cc-watch repair-stale dry_run=%s selected=%s state_root=%s grace_seconds=%s\n' \
+      "$([ "$REPAIR_STALE_YES" = "1" ] && printf no || printf yes)" \
+      "$selected_count" "$STATE_ROOT" "$REPAIR_STALE_GRACE_SECONDS"
+  fi
+
+  if [ "$REPAIR_STALE_JSON" != "1" ] && [ -n "$records" ]; then
     printf '%s\n' "$records" | while IFS="$(printf '\t')" read -r kind dir job status started_at reason; do
       [ -n "$job" ] || continue
       case "$kind" in
@@ -2852,7 +2925,14 @@ cmd_repair_stale() {
     done
   fi
 
-  [ "$REPAIR_STALE_YES" = "1" ] || return 0
+  if [ "$REPAIR_STALE_YES" != "1" ]; then
+    if [ "$REPAIR_STALE_JSON" = "1" ]; then
+      render_repair_stale_json "$records" "$apply_records" "$selected_count" "0"
+      return "$?"
+    fi
+    return 0
+  fi
+
   repaired=0
   while IFS="$(printf '\t')" read -r kind dir job status started_at reason; do
     [ -n "$job" ] || continue
@@ -2860,10 +2940,18 @@ cmd_repair_stale() {
     if repair_stale_selected_job "$dir" "$reason"; then
       repaired=$((repaired + 1))
     fi
+    if [ -n "$REPAIR_STALE_LAST_APPLY_RECORD" ]; then
+      apply_records="${apply_records}${REPAIR_STALE_LAST_APPLY_RECORD}
+"
+    fi
   done <<EOF
 $records
 EOF
-  printf 'repaired=%s\n' "$repaired"
+  if [ "$REPAIR_STALE_JSON" = "1" ]; then
+    render_repair_stale_json "$records" "$apply_records" "$selected_count" "$repaired"
+  else
+    printf 'repaired=%s\n' "$repaired"
+  fi
 }
 
 render_env_status() {

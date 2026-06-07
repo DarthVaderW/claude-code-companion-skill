@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.5.5 - 2026-06-07
+
+- Add `cc-watch repair-stale --json` for structured stale-job cleanup reports.
+
 ## v0.5.4 - 2026-06-07
 
 - Add `cc-watch repair-stale`, a dry-run-first cleanup command that marks old
