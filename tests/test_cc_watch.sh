@@ -27,14 +27,15 @@ Usage: fake claude
 HELP
   exit 0
 fi
+fake_session_id="${FAKE_SESSION_ID:-11111111-1111-1111-1111-111111111111}"
 if [ -n "${FAKE_PID_FILE:-}" ]; then
   printf '%s\n' "$$" > "$FAKE_PID_FILE"
 fi
 
 case "${FAKE_BEHAVIOR:-success}" in
   success)
-    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
-    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$fake_session_id"
+    printf '{"type":"result","subtype":"success","session_id":"%s","result":"fake final review"}\n' "$fake_session_id"
     ;;
   no-result)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
@@ -252,7 +253,7 @@ assert_contains "$(cat "$TMP_ROOT/default-result.json")" '"result_text"'
 assert_contains "$(cat "$TMP_ROOT/default-result.json")" "fake final review"
 
 version_text="$("$CC_WATCH" --version)"
-assert_contains "$version_text" "cc-watch 0.5.7"
+assert_contains "$version_text" "cc-watch 0.5.8"
 
 allow_bash_args="$(run_success allow-bash --allow-bash)"
 assert_contains "$allow_bash_args" "--tools Read,Grep,Glob,LS,Bash"
@@ -700,7 +701,7 @@ mark_job_stale "$doctor_work/.cc-watch/cc-doctor-empty-pids" "starting" "" "" ""
 ANTHROPIC_API_KEY=dummy-secret FAKE_ARGS_LOG="$doctor_args" \
   "$CC_WATCH" doctor --cwd "$doctor_work" --claude "$FAKE_CLAUDE" > "$doctor_out"
 doctor_text="$(cat "$doctor_out")"
-assert_contains "$doctor_text" "cc_watch_version=0.5.7"
+assert_contains "$doctor_text" "cc_watch_version=0.5.8"
 assert_contains "$doctor_text" "claude_path=$FAKE_CLAUDE"
 assert_contains "$doctor_text" "claude_version=fake claude 0.0.0"
 assert_contains "$doctor_text" "flag_print=yes"
@@ -1188,6 +1189,84 @@ FAKE_ARGS_LOG="$resume_mcp_args_log" FAKE_BEHAVIOR=success \
 assert_contains "$(tail -1 "$resume_mcp_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
 assert_contains "$(tail -1 "$resume_mcp_args_log")" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping"
 assert_not_contains "$(tail -1 "$resume_mcp_args_log")" "--strict-mcp-config"
+
+lineage_work="$(new_workdir resume-title-lineage)"
+FAKE_SESSION_ID=dddddddd-dddd-dddd-dddd-dddddddddddd FAKE_ARGS_LOG="$TMP_ROOT/resume-title-lineage-a.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$lineage_work" --claude "$FAKE_CLAUDE" \
+  --persist-session --title "lineage title" -- "first lineage" > "$TMP_ROOT/resume-title-lineage-a.out"
+lineage_a_job="$(job_id_for_work "$lineage_work")"
+FAKE_SESSION_ID=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee FAKE_ARGS_LOG="$TMP_ROOT/resume-title-lineage-b.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$lineage_work" --claude "$FAKE_CLAUDE" \
+  "$lineage_a_job" -- "resume lineage with new emitted session" > "$TMP_ROOT/resume-title-lineage-b.out"
+lineage_title_args="$TMP_ROOT/resume-title-lineage-title.args"
+FAKE_ARGS_LOG="$lineage_title_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$lineage_work" --claude "$FAKE_CLAUDE" \
+  "lineage title" -- "continue lineage by title" > "$TMP_ROOT/resume-title-lineage-title.out"
+assert_contains "$(tail -1 "$lineage_title_args")" "--resume eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+assert_not_contains "$(cat "$TMP_ROOT/resume-title-lineage-title.out")" "warning: resuming job"
+
+shadow_work="$(new_workdir resume-title-nonpersist-shadow)"
+FAKE_SESSION_ID=ffffffff-ffff-ffff-ffff-ffffffffffff FAKE_ARGS_LOG="$TMP_ROOT/resume-title-shadow-persist.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$shadow_work" --claude "$FAKE_CLAUDE" \
+  --persist-session --title "shadow title" -- "persisted shadow" > "$TMP_ROOT/resume-title-shadow-persist.out"
+FAKE_SESSION_ID=99999999-9999-9999-9999-999999999999 FAKE_ARGS_LOG="$TMP_ROOT/resume-title-shadow-nonpersist.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$shadow_work" --claude "$FAKE_CLAUDE" \
+  --title "shadow title" -- "nonpersistent shadow" > "$TMP_ROOT/resume-title-shadow-nonpersist.out"
+shadow_resume_args="$TMP_ROOT/resume-title-shadow-resume.args"
+FAKE_ARGS_LOG="$shadow_resume_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$shadow_work" --claude "$FAKE_CLAUDE" \
+  "shadow title" -- "continue persisted shadow" > "$TMP_ROOT/resume-title-shadow-resume.out"
+assert_contains "$(tail -1 "$shadow_resume_args")" "--resume ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+collision_work="$(new_workdir resume-title-collision)"
+collision_a_args="$TMP_ROOT/resume-title-collision-a.args"
+FAKE_SESSION_ID=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa FAKE_ARGS_LOG="$collision_a_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$collision_work" --claude "$FAKE_CLAUDE" \
+  --persist-session --title "duplicate title" -- "first duplicate" > "$TMP_ROOT/resume-title-collision-a.out"
+collision_a_job="$(job_id_for_work "$collision_work")"
+collision_b_args="$TMP_ROOT/resume-title-collision-b.args"
+FAKE_SESSION_ID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb FAKE_ARGS_LOG="$collision_b_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$collision_work" --claude "$FAKE_CLAUDE" \
+  --persist-session --title "duplicate title" -- "second duplicate" > "$TMP_ROOT/resume-title-collision-b.out"
+set +e
+FAKE_ARGS_LOG="$TMP_ROOT/resume-title-collision-resume.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$collision_work" --claude "$FAKE_CLAUDE" \
+  "duplicate title" -- "should not spawn" > "$TMP_ROOT/resume-title-collision-resume.out" 2>&1
+collision_resume_code="$?"
+set -e
+if [ "$collision_resume_code" -eq 0 ]; then
+  fail "resume by ambiguous title should fail"
+fi
+collision_resume_text="$(cat "$TMP_ROOT/resume-title-collision-resume.out")"
+assert_contains "$collision_resume_text" "ambiguous resumable title: duplicate title"
+assert_contains "$collision_resume_text" "resume by exact job id or session id"
+assert_contains "$collision_resume_text" "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+assert_contains "$collision_resume_text" "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+if [ -f "$TMP_ROOT/resume-title-collision-resume.args" ]; then
+  fail "ambiguous title resume spawned Claude"
+fi
+collision_exact_args="$TMP_ROOT/resume-title-collision-exact.args"
+FAKE_ARGS_LOG="$collision_exact_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$collision_work" --claude "$FAKE_CLAUDE" \
+  "$collision_a_job" -- "continue exact duplicate" > "$TMP_ROOT/resume-title-collision-exact.out"
+assert_contains "$(tail -1 "$collision_exact_args")" "--resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+cwd_parent="$(new_workdir resume-cwd-shared-state)"
+cwd_shared_state="$cwd_parent/state"
+mkdir -p "$cwd_shared_state"
+cwd_a="$(new_workdir resume-cwd-a)"
+cwd_b="$(new_workdir resume-cwd-b)"
+FAKE_SESSION_ID=cccccccc-cccc-cccc-cccc-cccccccccccc FAKE_ARGS_LOG="$TMP_ROOT/resume-cwd-a.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$cwd_a" --state-root "$cwd_shared_state" --allow-external-state-root \
+  --claude "$FAKE_CLAUDE" --persist-session --title "cross cwd" -- "first cwd" > "$TMP_ROOT/resume-cwd-a.out"
+cwd_a_job="$(job_id_for_state_parent "$cwd_shared_state")"
+cwd_resume_args="$TMP_ROOT/resume-cwd-warning.args"
+FAKE_ARGS_LOG="$cwd_resume_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" resume --cwd "$cwd_b" --state-root "$cwd_shared_state" --allow-external-state-root \
+  --claude "$FAKE_CLAUDE" "$cwd_a_job" -- "continue from another cwd" > "$TMP_ROOT/resume-cwd-warning.out" 2>&1
+cwd_warning_text="$(cat "$TMP_ROOT/resume-cwd-warning.out")"
+assert_contains "$cwd_warning_text" "warning: resuming job $cwd_a_job from cwd $cwd_a while current --cwd is $cwd_b"
+assert_contains "$(tail -1 "$cwd_resume_args")" "--resume cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 resume_raw_args_log="$TMP_ROOT/resumable-raw-resume.args"
 FAKE_ARGS_LOG="$resume_raw_args_log" FAKE_BEHAVIOR=success \

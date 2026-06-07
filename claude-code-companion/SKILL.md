@@ -46,6 +46,9 @@ Do not call Claude for tiny tasks where Codex can answer directly.
 - For a long task or `/goals` run, start one persisted Claude thread with a
   stable title, then prefer `cc-watch resume <title>` for subsequent plan,
   research, MCP-reading, and diff-review prompts so Claude keeps context.
+  Keep titles unique per task. If more than one independent resumable Claude
+  thread root has the same title, `resume <title>` refuses to guess; resume by
+  exact job id or session id.
 - Do not let Claude and Codex edit the same files at the same time unless the
   user explicitly asks for a handoff.
 - Do not expose secrets. Never ask Claude to print env values. If env checking
@@ -112,6 +115,8 @@ scripts/cc-watch resume --cwd . <session-id> -- "Continue by raw Claude session 
 
 Default jobs use `--no-session-persistence` and are not resumable. Use
 `--persist-session` for any Claude thread that may need a later continuation.
+If title-based resume is ambiguous because two persisted thread roots share the
+same title, use the exact job id or raw session id shown by the helper.
 
 For long work from a persistent terminal or one shell script:
 

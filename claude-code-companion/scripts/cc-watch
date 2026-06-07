@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-CC_WATCH_VERSION=0.5.7
+CC_WATCH_VERSION=0.5.8
 QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
@@ -1830,6 +1830,97 @@ find_job_dir_by_title() {
   printf '%s\n' "$latest_dir"
 }
 
+find_resumable_job_dir_by_title() {
+  local title="$1"
+  local root latest_dir="" latest_started="-1" latest_job="" dir started job job_title session no_session_persistence
+  root="$STATE_ROOT"
+  for dir in "$root"/*/; do
+    [ -f "$dir/job_id" ] || continue
+    job_title="$(read_file "$dir/title")"
+    [ "$job_title" = "$title" ] || continue
+    session="$(read_file "$dir/session_id")"
+    [ -n "$session" ] || continue
+    no_session_persistence="$(read_file "$dir/no_session_persistence")"
+    [ "$no_session_persistence" != "1" ] || continue
+    started="$(job_started_at_or_zero "$dir")"
+    job="$(read_file "$dir/job_id")"
+    if [ "$started" -gt "$latest_started" ] || { [ "$started" -eq "$latest_started" ] && [ "$job" \> "$latest_job" ]; }; then
+      latest_started="$started"
+      latest_job="$job"
+      latest_dir="${dir%/}"
+    fi
+  done
+  [ -n "$latest_dir" ] || return 1
+  printf '%s\n' "$latest_dir"
+}
+
+lineage_root_job_id() {
+  local dir="$1"
+  local current="$dir"
+  local parent job depth=0
+  while [ "$depth" -lt 100 ]; do
+    parent="$(read_file "$current/resumed_from")"
+    [ -n "$parent" ] || break
+    [ -f "$STATE_ROOT/$parent/job_id" ] || break
+    current="$STATE_ROOT/$parent"
+    depth=$((depth + 1))
+  done
+  job="$(read_file "$current/job_id")"
+  [ -n "$job" ] || job="$(basename "$current")"
+  printf '%s\n' "$job"
+}
+
+guard_ambiguous_resumable_title() {
+  local title="$1"
+  local root dir job job_title session no_session_persistence cwd started root_job
+  local seen_sessions="" seen_roots="" candidate_count=0 candidates=""
+  root="$STATE_ROOT"
+  for dir in "$root"/*/; do
+    [ -f "$dir/job_id" ] || continue
+    job_title="$(read_file "$dir/title")"
+    [ "$job_title" = "$title" ] || continue
+    session="$(read_file "$dir/session_id")"
+    [ -n "$session" ] || continue
+    no_session_persistence="$(read_file "$dir/no_session_persistence")"
+    [ "$no_session_persistence" != "1" ] || continue
+    case "
+$seen_sessions" in
+      *"
+$session
+"*) ;;
+      *)
+        root_job="$(lineage_root_job_id "${dir%/}")"
+        seen_sessions="$seen_sessions$session
+"
+        case "
+$seen_roots" in
+          *"
+$root_job
+"*) ;;
+          *)
+            seen_roots="$seen_roots$root_job
+"
+            candidate_count=$((candidate_count + 1))
+            ;;
+        esac
+        ;;
+    esac
+    job="$(read_file "$dir/job_id")"
+    cwd="$(read_file "$dir/cwd")"
+    started="$(job_started_at_or_zero "$dir")"
+    root_job="$(lineage_root_job_id "${dir%/}")"
+    candidates="${candidates}job=$job session_id=$session root_job=$root_job cwd=$cwd started_at=$started
+"
+  done
+
+  if [ "$candidate_count" -gt 1 ]; then
+    printf 'cc-watch: ambiguous resumable title: %s\n' "$title" >&2
+    printf 'cc-watch: resume by exact job id or session id. candidates:\n' >&2
+    printf '%s' "$candidates" >&2
+    exit 1
+  fi
+}
+
 looks_like_session_id() {
   case "$1" in
     ????????-????-????-????-????????????) return 0 ;;
@@ -2417,14 +2508,30 @@ parse_resume_options() {
 
 resolve_resume_session() {
   local selector="$1"
-  local parent_dir parent_job parent_title parent_session no_session_persistence
-  if parent_dir="$(resolve_job_selector "$selector" 2>/dev/null)"; then
+  local parent_dir parent_job parent_title parent_session parent_cwd no_session_persistence direct
+  direct="$STATE_ROOT/$selector"
+  if [ -f "$direct/job_id" ]; then
+    parent_dir="$direct"
+  elif parent_dir="$(find_resumable_job_dir_by_title "$selector" 2>/dev/null)"; then
+    guard_ambiguous_resumable_title "$selector"
+  elif parent_dir="$(find_job_dir_by_title "$selector" 2>/dev/null)"; then
+    :
+  else
+    parent_dir=""
+  fi
+
+  if [ -n "$parent_dir" ]; then
     parent_job="$(read_file "$parent_dir/job_id")"
     parent_title="$(read_file "$parent_dir/title")"
     parent_session="$(read_file "$parent_dir/session_id")"
+    parent_cwd="$(read_file "$parent_dir/cwd")"
     no_session_persistence="$(read_file "$parent_dir/no_session_persistence")"
     [ -n "$parent_session" ] || die "prior job recorded no session id: $parent_job"
     [ "$no_session_persistence" != "1" ] || die "prior job used --no-session-persistence; rerun it with --persist-session to enable resume"
+    if [ -n "$parent_cwd" ] && [ "$parent_cwd" != "$CWD" ]; then
+      printf 'cc-watch: warning: resuming job %s from cwd %s while current --cwd is %s\n' \
+        "$parent_job" "$parent_cwd" "$CWD" >&2
+    fi
     RESUME_SESSION="$parent_session"
     RESUMED_FROM="$parent_job"
     if [ -z "$TITLE" ]; then

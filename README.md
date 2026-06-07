@@ -244,8 +244,13 @@ claude-code-companion/scripts/cc-watch run --continue --cwd . -- "Continue Claud
 ```
 
 `resume` resolves selectors in this order: exact job id, exact title with the
-most recent matching job, then raw session id. When resuming from a job or title
-it refuses jobs that were not started with `--persist-session`.
+most recent resumable matching job, then raw session id. When resuming from a
+job or title it refuses jobs that were not started with `--persist-session`. If
+multiple independent resumable Claude thread roots share the same title,
+title-based resume refuses to guess and prints the candidate job ids/session
+ids; resume by exact job id or raw session id instead. If a job is resumed from
+a different `--cwd`, the helper prints a warning so cross-repo/shared-state
+resumes are visible.
 
 For MCP-backed research, start with a persisted thread and explicit read-only
 tools:
@@ -280,7 +285,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.7
+  --ref v0.5.8
 ```
 
 Restart Codex after installing or updating skills.

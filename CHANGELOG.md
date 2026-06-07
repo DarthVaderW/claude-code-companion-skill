@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.5.8 - 2026-06-07
+
+- Refuse ambiguous `cc-watch resume <title>` calls when the same title maps to
+  multiple independent resumable Claude thread roots; print candidate job
+  ids/session ids instead of guessing.
+- Prefer the most recent resumable job for title-based resume, so a newer
+  non-persistent job with the same title does not hide an older persisted
+  thread.
+- Warn when resuming a persisted job from a different `--cwd`, so shared
+  state-root and cross-repo continuations are visible.
 
 ## v0.5.7 - 2026-06-07
 
