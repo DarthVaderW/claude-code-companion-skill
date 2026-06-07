@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.5.3 - 2026-06-07
+
 - Keep machine-readable `metadata.json`, `result --json`, and `list --json`
   structural paths consistent while still redacting user-supplied text fields.
 - Document the difference between local symlink development installs and
