@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-CC_WATCH_VERSION=0.5.6
+CC_WATCH_VERSION=0.5.7
 QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
@@ -186,6 +186,25 @@ read_file() {
   if [ -f "$path" ]; then
     cat "$path"
   fi
+}
+
+shell_quote() {
+  local value="$1"
+  printf "'"
+  while [ -n "$value" ]; do
+    case "$value" in
+      *"'"*)
+        printf '%s' "${value%%\'*}"
+        printf '%s' "'\\''"
+        value="${value#*\'}"
+        ;;
+      *)
+        printf '%s' "$value"
+        value=""
+        ;;
+    esac
+  done
+  printf "'"
 }
 
 redact_stream() {
@@ -2875,6 +2894,12 @@ list_repair_stale_records() {
   done
 }
 
+count_repair_stale_records() {
+  local records="$1"
+  local kind="$2"
+  printf '%s\n' "$records" | awk -F '\t' -v kind="$kind" '$1 == kind && $3 != "" { c++ } END { print c + 0 }'
+}
+
 repair_stale_selected_job() {
   local dir="$1"
   local reason="$2"
@@ -2916,7 +2941,7 @@ cmd_repair_stale() {
 
   local records apply_records selected_count kind dir job status started_at reason repaired
   records="$(list_repair_stale_records)"
-  selected_count="$(printf '%s\n' "$records" | awk -F '\t' '$1 == "selected" && $3 != "" { c++ } END { print c + 0 }')"
+  selected_count="$(count_repair_stale_records "$records" "selected")"
   apply_records=""
 
   if [ "$REPAIR_STALE_JSON" != "1" ]; then
@@ -3066,13 +3091,13 @@ cmd_doctor() {
   render_env_status no_proxy
   render_state_ignore_status
   stale_records="$(list_repair_stale_records)"
-  stale_selected_count="$(printf '%s\n' "$stale_records" | awk -F '\t' '$1 == "selected" && $3 != "" { c++ } END { print c + 0 }')"
-  stale_skipped_count="$(printf '%s\n' "$stale_records" | awk -F '\t' '$1 == "skipped" && $3 != "" { c++ } END { print c + 0 }')"
+  stale_selected_count="$(count_repair_stale_records "$stale_records" "selected")"
+  stale_skipped_count="$(count_repair_stale_records "$stale_records" "skipped")"
   printf 'stale_selected_count=%s\n' "$stale_selected_count"
   printf 'stale_skipped_count=%s\n' "$stale_skipped_count"
   if [ "$stale_selected_count" -gt 0 ]; then
     printf 'stale_warning=stale-nonterminal-jobs\n'
-    printf 'stale_repair_command=cc-watch repair-stale --cwd %s --state-root %s' "$CWD" "$STATE_ROOT"
+    printf 'stale_repair_command=cc-watch repair-stale --cwd %s --state-root %s' "$(shell_quote "$CWD")" "$(shell_quote "$STATE_ROOT")"
     [ "$EXTERNAL_STATE_ROOT" = "1" ] && printf ' --allow-external-state-root'
     printf ' --json\n'
   fi

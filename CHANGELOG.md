@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.5.7 - 2026-06-07
+
+- Quote `doctor` stale repair command paths so suggestions stay copy-pasteable
+  when `--cwd` or `--state-root` contains spaces, single quotes, or other
+  shell-significant characters.
+- Reuse one stale-record counting helper for `doctor` and `repair-stale`.
+
 ## v0.5.6 - 2026-06-07
 
 - Add `cc-watch --version`.

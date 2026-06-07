@@ -252,7 +252,7 @@ assert_contains "$(cat "$TMP_ROOT/default-result.json")" '"result_text"'
 assert_contains "$(cat "$TMP_ROOT/default-result.json")" "fake final review"
 
 version_text="$("$CC_WATCH" --version)"
-assert_contains "$version_text" "cc-watch 0.5.6"
+assert_contains "$version_text" "cc-watch 0.5.7"
 
 allow_bash_args="$(run_success allow-bash --allow-bash)"
 assert_contains "$allow_bash_args" "--tools Read,Grep,Glob,LS,Bash"
@@ -688,7 +688,7 @@ assert_not_contains "$secret_fail_text" "failsecret"
 assert_not_contains "$secret_fail_text" "failkey"
 assert_not_contains "$secret_fail_text" "lower-proxy-secret"
 
-doctor_work="$(new_workdir doctor)"
+doctor_work="$(new_workdir "doctor path o'brien")"
 doctor_out="$TMP_ROOT/doctor.out"
 doctor_args="$TMP_ROOT/doctor.args"
 mkdir -p "$doctor_work/.cc-watch/cc-doctor-stale"
@@ -700,7 +700,7 @@ mark_job_stale "$doctor_work/.cc-watch/cc-doctor-empty-pids" "starting" "" "" ""
 ANTHROPIC_API_KEY=dummy-secret FAKE_ARGS_LOG="$doctor_args" \
   "$CC_WATCH" doctor --cwd "$doctor_work" --claude "$FAKE_CLAUDE" > "$doctor_out"
 doctor_text="$(cat "$doctor_out")"
-assert_contains "$doctor_text" "cc_watch_version=0.5.6"
+assert_contains "$doctor_text" "cc_watch_version=0.5.7"
 assert_contains "$doctor_text" "claude_path=$FAKE_CLAUDE"
 assert_contains "$doctor_text" "claude_version=fake claude 0.0.0"
 assert_contains "$doctor_text" "flag_print=yes"
@@ -715,7 +715,17 @@ assert_contains "$doctor_text" "state_git_ignored=not-git"
 assert_contains "$doctor_text" "stale_selected_count=2"
 assert_contains "$doctor_text" "stale_skipped_count=0"
 assert_contains "$doctor_text" "stale_warning=stale-nonterminal-jobs"
-assert_contains "$doctor_text" "stale_repair_command=cc-watch repair-stale --cwd $doctor_work --state-root $doctor_work/.cc-watch --json"
+doctor_repair_command="$(printf '%s\n' "$doctor_text" | sed -n 's/^stale_repair_command=//p')"
+assert_contains "$doctor_repair_command" "\\''"
+doctor_repair_json="$(PATH="$(dirname "$CC_WATCH"):$PATH" eval "$doctor_repair_command")"
+printf '%s\n' "$doctor_repair_json" > "$TMP_ROOT/doctor-repair.json"
+assert_json_file "$TMP_ROOT/doctor-repair.json"
+perl -MJSON::PP -e '
+  local $/;
+  my $payload = JSON::PP->new->decode(<STDIN>);
+  die "selected count mismatch\n" unless $payload->{selected_count} == 2;
+  die "dry_run should be true\n" unless $payload->{dry_run};
+' < "$TMP_ROOT/doctor-repair.json" || fail "doctor stale repair command should be copy-pasteable"
 
 async_work="$(new_workdir async-success)"
 async_args="$TMP_ROOT/async-success.args"
