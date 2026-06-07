@@ -260,6 +260,20 @@ python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-githu
 
 Restart Codex after installing or updating skills.
 
+### Updating
+
+For a local development symlink, update this checkout with `git pull`. The
+symlink points at the working tree, so script changes are available immediately;
+restart Codex when `SKILL.md` changes.
+
+For stable installs, rerun the skill installer with the newest published
+`--ref` tag. The example above tracks the latest release tag. Restart Codex
+after the installer replaces the skill.
+
+Release this repo by moving the changelog entries under a new version heading,
+updating the installer `--ref` example, committing, creating an annotated tag,
+and pushing both the branch and tag.
+
 This project is not a `uvx` tool. Do not add `pyproject.toml` or a Python
 package only to install this skill.
 

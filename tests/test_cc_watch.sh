@@ -603,6 +603,47 @@ assert_not_contains "$secret_transcript_text" "user:pass"
 assert_not_contains "$secret_show_raw" "SECRET123"
 assert_contains "$(cat "$secret_dir/stdout.jsonl")" "SECRET123"
 
+metadata_path_work="$(new_workdir sk-metadata-path)"
+metadata_path_args="$TMP_ROOT/sk-metadata-path.args"
+metadata_path_title="metadata sk-ant-secretvalue"
+FAKE_ARGS_LOG="$metadata_path_args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$metadata_path_work" --claude "$FAKE_CLAUDE" \
+  --title "$metadata_path_title" --model "sk-ant-modelsecret" --effort "sk-ant-effortsecret" \
+  -- "review only" > "$TMP_ROOT/sk-metadata-path.out"
+metadata_path_job="$(job_id_for_work "$metadata_path_work")"
+metadata_path_dir="$(job_dir_for_work "$metadata_path_work")"
+metadata_path_text="$(cat "$metadata_path_dir/metadata.json")"
+assert_json_file "$metadata_path_dir/metadata.json"
+assert_contains "$metadata_path_text" "\"cwd\": \"$metadata_path_work\""
+assert_contains "$metadata_path_text" "sk-metadata-path"
+assert_contains "$metadata_path_text" "metadata sk-ant-REDACTED"
+assert_contains "$metadata_path_text" "\"model\": \"sk-ant-REDACTED\""
+assert_contains "$metadata_path_text" "\"effort\": \"sk-ant-REDACTED\""
+assert_not_contains "$metadata_path_text" "sk-REDACTED"
+assert_not_contains "$metadata_path_text" "sk-ant-secretvalue"
+assert_not_contains "$metadata_path_text" "modelsecret"
+assert_not_contains "$metadata_path_text" "effortsecret"
+metadata_show_text="$("$CC_WATCH" show --cwd "$metadata_path_work" "$metadata_path_job" --metadata)"
+[ "$metadata_show_text" = "$metadata_path_text" ] || fail "show --metadata should print stored metadata without extra redaction"
+"$CC_WATCH" result "$metadata_path_job" --cwd "$metadata_path_work" --json > "$TMP_ROOT/sk-metadata-result.json"
+"$CC_WATCH" list --cwd "$metadata_path_work" --json > "$TMP_ROOT/sk-metadata-list.json"
+assert_json_file "$TMP_ROOT/sk-metadata-result.json"
+assert_json_file "$TMP_ROOT/sk-metadata-list.json"
+assert_contains "$(cat "$TMP_ROOT/sk-metadata-result.json")" "$metadata_path_work"
+assert_contains "$(cat "$TMP_ROOT/sk-metadata-list.json")" "$metadata_path_work"
+perl -MJSON::PP -e '
+  local $/;
+  open my $mf, "<", $ARGV[0] or die $!;
+  my $metadata = JSON::PP->new->decode(<$mf>);
+  open my $rf, "<", $ARGV[1] or die $!;
+  my $result = JSON::PP->new->decode(<$rf>);
+  open my $lf, "<", $ARGV[2] or die $!;
+  my $list = JSON::PP->new->decode(<$lf>);
+  die "cwd mismatch\n" unless @$list == 1 && $metadata->{cwd} eq $result->{cwd} && $metadata->{cwd} eq $list->[0]{cwd};
+  die "result_path mismatch\n" unless $result->{result_path} eq $list->[0]{result_path};
+' "$metadata_path_dir/metadata.json" "$TMP_ROOT/sk-metadata-result.json" "$TMP_ROOT/sk-metadata-list.json" \
+  || fail "metadata, result --json, and list --json should agree on structural paths"
+
 secret_fail_work="$(new_workdir secret-fail)"
 secret_fail_args="$TMP_ROOT/secret-fail.args"
 set +e

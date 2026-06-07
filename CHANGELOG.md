@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep machine-readable `metadata.json`, `result --json`, and `list --json`
+  structural paths consistent while still redacting user-supplied text fields.
+- Document the difference between local symlink development installs and
+  GitHub tag-based stable installs.
+
 ## v0.5.2 - 2026-06-07
 
 - Add `cc-watch list --json` for machine-readable, newest-first job indexes
