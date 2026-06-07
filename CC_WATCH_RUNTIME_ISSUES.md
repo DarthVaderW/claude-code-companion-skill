@@ -29,6 +29,12 @@ Resolved after `v0.3.0`:
   `stream-json`.
 - `cc-watch` now supports repeatable `--mcp-tool TOOL`, which loads configured
   MCP servers while keeping Claude's `--tools` list narrowed to explicit tools.
+- `cc-watch repair-stale` provides a dry-run-first cleanup path for old
+  non-terminal jobs whose worker, Claude, and watchdog processes have all died.
+  It marks them `failed` and writes a readable result archive; it does not
+  delete directories or kill processes.
+- The README now separates local symlink development installs from stable
+  GitHub-tagged skill installs and updates.
 
 Resolved in `v0.3.0`:
 
@@ -50,15 +56,10 @@ Resolved in `v0.3.0`:
 
 1. Add more `doctor` guidance for custom state roots if real-world usage shows
    confusing archive locations.
-2. Add a cleanup path for stale `running-*` jobs whose worker process has
-   already died; current prune/archive intentionally skip raw non-terminal
-   status files.
-3. Document the release and install/update path for GitHub-tagged skill
-   installs separately from local symlink development installs.
-4. Keep mutating Claude plugin operations out of `cc-watch`. If a future
+2. Keep mutating Claude plugin operations out of `cc-watch`. If a future
    `cc-plugin update` is added, it must require explicit plugin names, `--yes`,
    and a clear warning that it writes global `~/.claude` plugin state.
-5. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
+3. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
    tool names are stable across the user's Claude Code installs. Prompt text
    alone is not a write guard.
 

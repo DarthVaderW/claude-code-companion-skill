@@ -181,6 +181,24 @@ new_workdir() {
   printf '%s\n' "$dir"
 }
 
+mark_job_stale() {
+  local dir="$1"
+  local status="$2"
+  local worker_pid="${3:-}"
+  local claude_pid="${4:-}"
+  local watchdog_pid="${5:-}"
+  local started_at="${6:-1}"
+  printf '%s\n' "$status" > "$dir/status"
+  printf '%s\n' "$worker_pid" > "$dir/worker_pid"
+  printf '%s\n' "$claude_pid" > "$dir/claude_pid"
+  printf '%s\n' "$watchdog_pid" > "$dir/watchdog_pid"
+  printf '%s\n' "$started_at" > "$dir/started_at"
+  : > "$dir/final-text.txt"
+  : > "$dir/stdout.jsonl"
+  : > "$dir/stderr.log"
+  rm -f "$dir/final-result.json" "$dir/result.txt" "$dir/transcript.md" "$dir/metadata.json" "$dir/metadata.md"
+}
+
 new_git_workdir() {
   local dir
   dir="$(new_workdir "$1")"
@@ -882,10 +900,120 @@ running_prune_job="$(FAKE_ARGS_LOG="$running_prune_args" FAKE_BEHAVIOR=slow FAKE
   "$CC_WATCH" start --cwd "$running_prune_work" --claude "$FAKE_CLAUDE" -- "review only")"
 wait_for_file "$running_prune_pid_file"
 wait_for_status "$running_prune_work" "$running_prune_job" "running-" >/dev/null
+repair_live_text="$("$CC_WATCH" repair-stale --cwd "$running_prune_work" --yes)"
+assert_contains "$repair_live_text" "cc-watch repair-stale dry_run=no selected=0"
+assert_contains "$repair_live_text" "skipped job=$running_prune_job"
+assert_contains "$repair_live_text" "reason=process-alive"
 running_prune_text="$("$CC_WATCH" prune --cwd "$running_prune_work" --all-terminal --yes)"
 assert_contains "$running_prune_text" "pruned=1"
 [ -d "$running_prune_work/.cc-watch/$running_prune_job" ] || fail "running job should survive prune --all-terminal"
 "$CC_WATCH" cancel "$running_prune_job" --cwd "$running_prune_work" >/dev/null
+
+repair_work="$(new_workdir repair-stale)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_work" --claude "$FAKE_CLAUDE" \
+  --title "sk-ant-secretvalue" -- "review only" > "$TMP_ROOT/repair-stale.out"
+repair_job="$(job_id_for_work "$repair_work")"
+repair_dir="$(job_dir_for_work "$repair_work")"
+mark_job_stale "$repair_dir" "running-quiet" "2147483647" "" "" "1"
+repair_dry="$("$CC_WATCH" repair-stale --cwd "$repair_work")"
+assert_contains "$repair_dry" "cc-watch repair-stale dry_run=yes selected=1"
+assert_contains "$repair_dry" "selected job=$repair_job"
+assert_contains "$repair_dry" "reason=dead-pids"
+[ "$(cat "$repair_dir/status")" = "running-quiet" ] || fail "repair-stale dry-run mutated status"
+repair_yes="$("$CC_WATCH" repair-stale --cwd "$repair_work" --yes)"
+assert_contains "$repair_yes" "cc-watch repair-stale dry_run=no selected=1"
+assert_contains "$repair_yes" "repaired job=$repair_job status=failed reason=dead-pids"
+assert_contains "$repair_yes" "repaired=1"
+[ "$(cat "$repair_dir/status")" = "failed" ] || fail "repair-stale should mark job failed"
+[ "$(cat "$repair_dir/exit_code")" = "1" ] || fail "repair-stale should write exit_code=1"
+assert_json_file "$repair_dir/metadata.json"
+assert_contains "$(cat "$repair_dir/metadata.json")" '"status": "failed"'
+assert_contains "$(cat "$repair_dir/result.txt")" "repair-stale found no live worker"
+assert_contains "$(cat "$repair_dir/result.txt")" "NO FINAL RESULT"
+assert_contains "$(cat "$repair_dir/transcript.md")" "repair-stale found no live worker"
+assert_not_contains "$(cat "$repair_dir/result.txt")" "sk-ant-secretvalue"
+if repair_result="$("$CC_WATCH" result "$repair_job" --cwd "$repair_work" 2>&1)"; then
+  fail "repair-stale failed job result should exit non-zero"
+else
+  repair_result_code="$?"
+fi
+[ "$repair_result_code" -eq 1 ] || fail "repair-stale result should exit 1, got $repair_result_code"
+assert_contains "$repair_result" "status: \`failed\`"
+repair_second="$("$CC_WATCH" repair-stale --cwd "$repair_work" --yes)"
+assert_contains "$repair_second" "cc-watch repair-stale dry_run=no selected=0"
+assert_contains "$repair_second" "repaired=0"
+repair_prune="$("$CC_WATCH" prune --cwd "$repair_work" --all-terminal --yes)"
+assert_contains "$repair_prune" "pruned=1"
+[ "$(count_job_dirs_for_work "$repair_work")" -eq 0 ] || fail "repair-stale job should prune after terminal repair"
+
+repair_recent_work="$(new_workdir repair-stale-recent)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-recent.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_recent_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-recent.out"
+repair_recent_job="$(job_id_for_work "$repair_recent_work")"
+repair_recent_dir="$(job_dir_for_work "$repair_recent_work")"
+mark_job_stale "$repair_recent_dir" "starting" "" "" "" "$(date +%s)"
+repair_recent="$("$CC_WATCH" repair-stale --cwd "$repair_recent_work" --grace-seconds 60 --yes)"
+assert_contains "$repair_recent" "cc-watch repair-stale dry_run=no selected=0"
+assert_contains "$repair_recent" "skipped job=$repair_recent_job"
+assert_contains "$repair_recent" "reason=within-grace"
+[ "$(cat "$repair_recent_dir/status")" = "starting" ] || fail "recent starting job should stay non-terminal"
+
+repair_old_work="$(new_workdir repair-stale-old-nopid)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-old.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_old_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-old.out"
+repair_old_job="$(job_id_for_work "$repair_old_work")"
+repair_old_dir="$(job_dir_for_work "$repair_old_work")"
+mark_job_stale "$repair_old_dir" "starting" "" "" "" "1"
+mkdir -p "$repair_old_work/.cc-watch/cc-not-a-job"
+repair_old="$("$CC_WATCH" repair-stale --cwd "$repair_old_work" --grace-seconds 1 --yes)"
+assert_contains "$repair_old" "selected job=$repair_old_job"
+assert_contains "$repair_old" "reason=no-pid-after-grace"
+assert_contains "$repair_old" "repaired=1"
+[ "$(cat "$repair_old_dir/status")" = "failed" ] || fail "old no-pid starting job should be repaired"
+
+repair_missing_status_work="$(new_workdir repair-stale-missing-status)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-stale-missing-status.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_missing_status_work" --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-stale-missing-status.out"
+repair_missing_status_job="$(job_id_for_work "$repair_missing_status_work")"
+repair_missing_status_dir="$(job_dir_for_work "$repair_missing_status_work")"
+mark_job_stale "$repair_missing_status_dir" "" "" "" "" "1"
+repair_missing_status="$("$CC_WATCH" repair-stale --cwd "$repair_missing_status_work" --yes)"
+assert_contains "$repair_missing_status" "selected job=$repair_missing_status_job"
+assert_contains "$repair_missing_status" "reason=missing-status"
+assert_contains "$repair_missing_status" "repaired=1"
+if "$CC_WATCH" repair-stale --cwd "$repair_missing_status_work" --grace-seconds nope >/dev/null 2>&1; then
+  fail "repair-stale --grace-seconds with a non-integer should fail"
+fi
+
+repair_shared_parent="$TMP_ROOT/repair-shared-state"
+repair_shared_a_work="$(new_workdir repair-shared-a)"
+repair_shared_b_work="$(new_workdir repair-shared-b)"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-shared-a.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_shared_a_work" --state-root "$repair_shared_parent" \
+  --allow-external-state-root --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-shared-a.out"
+repair_shared_a_job="$(job_id_for_state_parent "$repair_shared_parent")"
+repair_shared_a_dir="$repair_shared_parent/.cc-watch/$repair_shared_a_job"
+FAKE_ARGS_LOG="$TMP_ROOT/repair-shared-b.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$repair_shared_b_work" --state-root "$repair_shared_parent" \
+  --allow-external-state-root --claude "$FAKE_CLAUDE" -- "review only" > "$TMP_ROOT/repair-shared-b.out"
+repair_shared_b_job="$(find "$repair_shared_parent/.cc-watch" -maxdepth 2 -name job_id -exec cat {} \; | grep -v "^$repair_shared_a_job$")"
+repair_shared_b_dir="$repair_shared_parent/.cc-watch/$repair_shared_b_job"
+mark_job_stale "$repair_shared_a_dir" "running-quiet" "2147483647" "" "" "1"
+mark_job_stale "$repair_shared_b_dir" "running-quiet" "2147483647" "" "" "1"
+repair_shared="$("$CC_WATCH" repair-stale --cwd "$repair_shared_a_work" --state-root "$repair_shared_parent" --allow-external-state-root --yes)"
+assert_contains "$repair_shared" "repaired=2"
+perl -MJSON::PP -e '
+  local $/;
+  open my $af, "<", $ARGV[0] or die "a";
+  my $a = JSON::PP->new->decode(<$af>);
+  open my $bf, "<", $ARGV[2] or die "b";
+  my $b = JSON::PP->new->decode(<$bf>);
+  die "a cwd mismatch\n" unless $a->{cwd} eq $ARGV[1];
+  die "b cwd mismatch\n" unless $b->{cwd} eq $ARGV[3];
+' "$repair_shared_a_dir/metadata.json" "$repair_shared_a_work" \
+  "$repair_shared_b_dir/metadata.json" "$repair_shared_b_work" \
+  || fail "repair-stale should render metadata with each job cwd"
 
 show_last="$("$CC_WATCH" show --cwd "$async_work" --last)"
 assert_contains "$show_last" "fake final review"

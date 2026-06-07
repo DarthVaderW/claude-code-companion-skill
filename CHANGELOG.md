@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.5.4 - 2026-06-07
+
+- Add `cc-watch repair-stale`, a dry-run-first cleanup command that marks old
+  non-terminal jobs as `failed` only after confirming no worker, Claude, or
+  watchdog process is alive.
+
 ## v0.5.3 - 2026-06-07
 
 - Keep machine-readable `metadata.json`, `result --json`, and `list --json`

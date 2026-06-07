@@ -106,6 +106,8 @@ claude-code-companion/scripts/cc-watch archive --cwd . --keep 10
 claude-code-companion/scripts/cc-watch archive --cwd . --keep 10 --yes
 claude-code-companion/scripts/cc-watch prune --cwd . --keep 10
 claude-code-companion/scripts/cc-watch prune --cwd . --keep 10 --yes
+claude-code-companion/scripts/cc-watch repair-stale --cwd .
+claude-code-companion/scripts/cc-watch repair-stale --cwd . --yes
 ```
 
 `archive` writes a tarball under `.cc-watch/archives/`. `prune` never removes
@@ -113,6 +115,13 @@ running jobs, and `prune --yes` requires an explicit selector such as `--keep`,
 `--older-than-days`, or `--all-terminal`. `archive --yes` without a selector
 archives every terminal job. `--keep` and `--older-than-days` require positive
 integers; use `--all-terminal` when you intentionally want all terminal jobs.
+`repair-stale` is also dry-run by default. It does not delete directories or
+kill processes; with `--yes`, it marks old non-terminal jobs as `failed` only
+when no worker, Claude, or watchdog process is alive. Recent no-PID `starting`
+jobs are skipped for 30 seconds by default; adjust with `--grace-seconds N`.
+In `--yes` output, `selected=N` is the pre-repair candidate count; `repaired=N`
+can be lower if the command re-checks a job and finds that it became terminal
+or live again before mutation.
 
 Runtime state for async jobs is written under the target working directory by
 default:
@@ -255,7 +264,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.3
+  --ref v0.5.4
 ```
 
 Restart Codex after installing or updating skills.
