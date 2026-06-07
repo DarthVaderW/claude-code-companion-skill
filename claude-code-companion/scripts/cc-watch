@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
+CC_WATCH_VERSION=0.5.6
 QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
@@ -11,6 +12,7 @@ REPAIR_STALE_GRACE_SECONDS_DEFAULT=30
 usage() {
   cat <<'EOF'
 Usage:
+  cc-watch --version
   cc-watch run [options] -- PROMPT
   cc-watch review-diff [options] [--base REF] [--max-diff-bytes N]
   cc-watch start [options] -- PROMPT
@@ -114,6 +116,17 @@ script_path() {
   local dir
   dir="$(cd "$(dirname "$src")" 2>/dev/null && pwd)" || return 1
   printf '%s/%s\n' "$dir" "$(basename "$src")"
+}
+
+render_version() {
+  local path dir repo git_desc
+  printf 'cc-watch %s\n' "$CC_WATCH_VERSION"
+  path="$(script_path 2>/dev/null || true)"
+  dir="$(dirname "$path" 2>/dev/null || printf '.')"
+  if repo="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"; then
+    git_desc="$(git -C "$repo" describe --tags --dirty --always 2>/dev/null || true)"
+    [ -n "$git_desc" ] && printf 'git=%s\n' "$git_desc"
+  fi
 }
 
 state_root_for() {
@@ -777,6 +790,7 @@ parse_doctor_options() {
   STATE_ROOT_RAW=""
   ALLOW_EXTERNAL_STATE_ROOT=0
   CLAUDE="${CLAUDE_BIN:-claude}"
+  REPAIR_STALE_GRACE_SECONDS="$REPAIR_STALE_GRACE_SECONDS_DEFAULT"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -3011,7 +3025,11 @@ render_state_ignore_status() {
 cmd_doctor() {
   parse_doctor_options "$@"
 
-  local resolved version help_text
+  local resolved version help_text stale_records stale_selected_count stale_skipped_count
+  printf 'cc_watch_version=%s\n' "$CC_WATCH_VERSION"
+  if version="$(render_version | awk -F= '/^git=/{print $2; exit}')"; then
+    [ -n "$version" ] && printf 'cc_watch_git=%s\n' "$version"
+  fi
   printf 'cwd=%s\n' "$CWD"
   if resolved="$(resolve_claude_binary)"; then
     CLAUDE="$resolved"
@@ -3047,6 +3065,17 @@ cmd_doctor() {
   render_env_status all_proxy
   render_env_status no_proxy
   render_state_ignore_status
+  stale_records="$(list_repair_stale_records)"
+  stale_selected_count="$(printf '%s\n' "$stale_records" | awk -F '\t' '$1 == "selected" && $3 != "" { c++ } END { print c + 0 }')"
+  stale_skipped_count="$(printf '%s\n' "$stale_records" | awk -F '\t' '$1 == "skipped" && $3 != "" { c++ } END { print c + 0 }')"
+  printf 'stale_selected_count=%s\n' "$stale_selected_count"
+  printf 'stale_skipped_count=%s\n' "$stale_skipped_count"
+  if [ "$stale_selected_count" -gt 0 ]; then
+    printf 'stale_warning=stale-nonterminal-jobs\n'
+    printf 'stale_repair_command=cc-watch repair-stale --cwd %s --state-root %s' "$CWD" "$STATE_ROOT"
+    [ "$EXTERNAL_STATE_ROOT" = "1" ] && printf ' --allow-external-state-root'
+    printf ' --json\n'
+  fi
 }
 
 main() {
@@ -3059,6 +3088,7 @@ main() {
   shift
 
   case "$command" in
+    version|--version) render_version ;;
     run) cmd_run "$@" ;;
     review-diff) cmd_review_diff "$@" ;;
     resume) cmd_resume "$@" ;;

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.5.6 - 2026-06-07
+
+- Add `cc-watch --version`.
+- Extend `cc-watch doctor` with helper version, stale job counts, and a
+  dry-run repair command when stale non-terminal jobs are present.
+
 ## v0.5.5 - 2026-06-07
 
 - Add `cc-watch repair-stale --json` for structured stale-job cleanup reports.

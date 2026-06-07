@@ -49,8 +49,14 @@ from `--cwd`.
 Check local readiness without sending a model request:
 
 ```bash
+claude-code-companion/scripts/cc-watch --version
 claude-code-companion/scripts/cc-watch doctor --cwd .
 ```
+
+`doctor` reports the local helper version, Claude CLI readiness, redacted
+environment status, state-root location, and stale non-terminal job counts. If
+old dead jobs are repairable, it prints a dry-run `repair-stale --json`
+command to inspect them.
 
 For longer tasks:
 
@@ -274,7 +280,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.5
+  --ref v0.5.6
 ```
 
 Restart Codex after installing or updating skills.

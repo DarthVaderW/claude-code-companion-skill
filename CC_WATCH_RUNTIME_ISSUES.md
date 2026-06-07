@@ -33,6 +33,8 @@ Resolved after `v0.3.0`:
   non-terminal jobs whose worker, Claude, and watchdog processes have all died.
   It marks them `failed` and writes a readable result archive; it does not
   delete directories or kill processes.
+- `cc-watch doctor` now reports the helper version, state-root placement, stale
+  job counts, and a dry-run repair command for repairable stale jobs.
 - The README now separates local symlink development installs from stable
   GitHub-tagged skill installs and updates.
 
@@ -54,12 +56,10 @@ Resolved in `v0.3.0`:
 
 ## Still Open
 
-1. Add more `doctor` guidance for custom state roots if real-world usage shows
-   confusing archive locations.
-2. Keep mutating Claude plugin operations out of `cc-watch`. If a future
+1. Keep mutating Claude plugin operations out of `cc-watch`. If a future
    `cc-plugin update` is added, it must require explicit plugin names, `--yes`,
    and a clear warning that it writes global `~/.claude` plugin state.
-3. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
+2. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
    tool names are stable across the user's Claude Code installs. Prompt text
    alone is not a write guard.
 

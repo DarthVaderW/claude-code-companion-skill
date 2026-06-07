@@ -93,8 +93,13 @@ from `--cwd`.
 Before diagnosing auth, proxy, PATH, or CLI flag issues:
 
 ```bash
+scripts/cc-watch --version
 scripts/cc-watch doctor --cwd .
 ```
+
+`doctor` also reports state-root placement and stale non-terminal job counts;
+when repairable stale jobs exist, follow its `repair-stale --json` dry-run
+command before applying `--yes`.
 
 For resumable work:
 
