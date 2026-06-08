@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-CC_WATCH_VERSION=0.5.9
+CC_WATCH_VERSION=0.5.10
 QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
@@ -60,8 +60,9 @@ Options:
                         Default: 60000. 0 disables truncation.
   --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
   --allow-mcp           Load Claude Code MCP config instead of strict empty MCP.
-  --mcp-tool TOOL       Load MCP config and add one explicit MCP tool to the
-                        read-only tool allowlist. Use exact mcp__... names.
+  --mcp-tool TOOL       Load MCP config, enable ToolSearch discovery, and add
+                        one explicit MCP tool to --allowedTools. Use exact
+                        mcp__... names.
                         siyuan_* and zotero_* expand to Claude plugin names.
                         Repeatable.
   --read-write          Allow Claude Code's default write-capable tools.
@@ -1101,7 +1102,7 @@ extract_denied_tool_warnings() {
         }
         for my $candidate (@candidates) {
           next unless defined $candidate;
-          next unless $candidate =~ /(denied|disallowed|not allowed|permission)/i;
+          next unless $candidate =~ /(denied|disallowed|not allowed|permission denied|permission_denials|not permitted|requires permission|(?:do not|does not|not|no) have permission)/i;
           $candidate =~ s/\s+/ /g;
           $candidate =~ s/\A\s+//;
           $candidate =~ s/\s+\z//;
@@ -1520,11 +1521,16 @@ build_claude_args() {
       allowed_tools="$allowed_tools,Bash"
     fi
     if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
-      for tool in "${MCP_TOOLS[@]}"; do
-        allowed_tools="$allowed_tools,$tool"
-      done
+      allowed_tools="$allowed_tools,ToolSearch"
     fi
     CLAUDE_ARGS+=(--tools "$allowed_tools")
+    if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
+      local mcp_allowed_tools="${MCP_TOOLS[0]}"
+      for tool in "${MCP_TOOLS[@]:1}"; do
+        mcp_allowed_tools="$mcp_allowed_tools,$tool"
+      done
+      CLAUDE_ARGS+=(--allowedTools "$mcp_allowed_tools")
+    fi
   fi
   if [ "$ALLOW_MCP" != "1" ]; then
     CLAUDE_ARGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
@@ -3233,7 +3239,7 @@ render_flag_status() {
   local help_text="$1"
   local label="$2"
   local pattern="$3"
-  if printf '%s' "$help_text" | grep -q -- "$pattern"; then
+  if printf '%s' "$help_text" | grep -Eq -- "$pattern"; then
     printf 'flag_%s=yes\n' "$label"
   else
     printf 'flag_%s=no\n' "$label"
@@ -3296,6 +3302,7 @@ cmd_doctor() {
     render_flag_status "$help_text" "print" "-p, --print"
     render_flag_status "$help_text" "stream_json" "stream-json"
     render_flag_status "$help_text" "tools" "--tools"
+    render_flag_status "$help_text" "allowed_tools" "--allowedTools|--allowed-tools"
     render_flag_status "$help_text" "strict_mcp_config" "--strict-mcp-config"
     render_flag_status "$help_text" "no_session_persistence" "--no-session-persistence"
     render_flag_status "$help_text" "permission_mode" "--permission-mode"

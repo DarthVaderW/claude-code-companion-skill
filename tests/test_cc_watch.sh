@@ -21,6 +21,7 @@ Usage: fake claude
   -p, --print
   --output-format stream-json
   --tools
+  --allowedTools
   --strict-mcp-config
   --no-session-persistence
   --permission-mode
@@ -88,6 +89,16 @@ case "${FAKE_BEHAVIOR:-success}" in
     printf '%s\n' '{"type":"system","message":"permission denied: tool Write is not allowed by cc-watch"}'
     printf 'Permission denied for tool Write before final result.\n' >&2
     exit 42
+    ;;
+  permission-prose)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Claude mentioned fewer-permission-prompts while discussing slash commands; this is not a denial."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
+  permission-denial-prose)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"You do not have permission to use tool Write in this run."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
     ;;
   secret-success)
     printf 'stderr Authorization: Bearer STDERRSECRET Proxy-Authorization: Basic PROXYSECRET sk-ant-stderrsecret ANTHROPIC_API_KEY=stderr-secret http_proxy=http://user:pass@proxy\n' >&2
@@ -267,6 +278,8 @@ assert_contains "$default_args" "--no-session-persistence"
 assert_contains "$default_args" "--tools Read,Grep,Glob,LS"
 assert_contains "$default_args" "--strict-mcp-config --mcp-config {\"mcpServers\":{}}"
 assert_not_contains "$default_args" "--disallowed-tools"
+assert_not_contains "$default_args" "ToolSearch"
+assert_not_contains "$default_args" "--allowedTools"
 assert_not_contains "$default_args" "Bash"
 default_job="$(job_id_for_work "$TMP_ROOT/work-default")"
 "$CC_WATCH" result "$default_job" --cwd "$TMP_ROOT/work-default" --json > "$TMP_ROOT/default-result.json"
@@ -275,18 +288,24 @@ assert_contains "$(cat "$TMP_ROOT/default-result.json")" '"result_text"'
 assert_contains "$(cat "$TMP_ROOT/default-result.json")" "fake final review"
 
 version_text="$("$CC_WATCH" --version)"
-assert_contains "$version_text" "cc-watch 0.5.9"
+assert_contains "$version_text" "cc-watch 0.5.10"
 
 allow_bash_args="$(run_success allow-bash --allow-bash)"
 assert_contains "$allow_bash_args" "--tools Read,Grep,Glob,LS,Bash"
 assert_contains "$allow_bash_args" "--strict-mcp-config"
+assert_not_contains "$allow_bash_args" "ToolSearch"
+assert_not_contains "$allow_bash_args" "--allowedTools"
 
 allow_mcp_args="$(run_success allow-mcp --allow-mcp)"
 assert_contains "$allow_mcp_args" "--tools Read,Grep,Glob,LS"
 assert_not_contains "$allow_mcp_args" "--strict-mcp-config"
+assert_not_contains "$allow_mcp_args" "ToolSearch"
+assert_not_contains "$allow_mcp_args" "--allowedTools"
 
 mcp_tool_args="$(run_success mcp-tool --mcp-tool mcp__siyuan__siyuan_ping --mcp-tool mcp__zotero__zotero_ping)"
-assert_contains "$mcp_tool_args" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping"
+assert_contains "$mcp_tool_args" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$mcp_tool_args" "--allowedTools mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping"
+assert_not_contains "$mcp_tool_args" "Read,Grep,Glob,LS,mcp__"
 assert_not_contains "$mcp_tool_args" "--strict-mcp-config"
 mcp_tool_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-tool")"
 assert_contains "$(cat "$mcp_tool_dir/metadata.json")" '"mcp_tool_requests": ["mcp__siyuan__siyuan_ping","mcp__zotero__zotero_ping"]'
@@ -295,25 +314,30 @@ assert_contains "$(cat "$mcp_tool_dir/metadata.md")" "- mcp_tool_requests: \`mcp
 assert_contains "$(cat "$mcp_tool_dir/metadata.md")" "- mcp_tools: \`mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping\`"
 
 mcp_alias_args="$(run_success mcp-tool-alias --mcp-tool siyuan_sql_query --mcp-tool zotero_ping)"
-assert_contains "$mcp_alias_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query,mcp__plugin_zotero-mcp_zotero__zotero_ping"
+assert_contains "$mcp_alias_args" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$mcp_alias_args" "--allowedTools mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query,mcp__plugin_zotero-mcp_zotero__zotero_ping"
+assert_not_contains "$mcp_alias_args" "Read,Grep,Glob,LS,mcp__"
 mcp_alias_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-tool-alias")"
 assert_contains "$(cat "$mcp_alias_dir/metadata.json")" '"mcp_tool_requests": ["siyuan_sql_query","zotero_ping"]'
 assert_contains "$(cat "$mcp_alias_dir/metadata.json")" '"mcp_tools": ["mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query","mcp__plugin_zotero-mcp_zotero__zotero_ping"]'
 
 mcp_pending_args="$(run_success_with_behavior mcp-pending mcp-pending --mcp-tool siyuan_ping)"
-assert_contains "$mcp_pending_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+assert_contains "$mcp_pending_args" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$mcp_pending_args" "--allowedTools mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
 mcp_pending_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending")"
 assert_contains "$(cat "$mcp_pending_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
 assert_contains "$(cat "$mcp_pending_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
 
 mcp_pending_mixed_args="$(run_success_with_behavior mcp-pending-mixed mcp-pending-mixed --mcp-tool siyuan_ping)"
-assert_contains "$mcp_pending_mixed_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+assert_contains "$mcp_pending_mixed_args" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$mcp_pending_mixed_args" "--allowedTools mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
 mcp_pending_mixed_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending-mixed")"
 assert_not_contains "$(cat "$mcp_pending_mixed_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
 assert_contains "$(cat "$mcp_pending_mixed_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
 
 mcp_pending_array_args="$(run_success_with_behavior mcp-pending-array mcp-pending-array --mcp-tool siyuan_ping)"
-assert_contains "$mcp_pending_array_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+assert_contains "$mcp_pending_array_args" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$mcp_pending_array_args" "--allowedTools mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
 mcp_pending_array_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending-array")"
 assert_not_contains "$(cat "$mcp_pending_array_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
 assert_contains "$(cat "$mcp_pending_array_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
@@ -346,6 +370,7 @@ fi
 
 read_write_args="$(run_success read-write --read-write)"
 assert_not_contains "$read_write_args" "--tools"
+assert_not_contains "$read_write_args" "--allowedTools"
 assert_contains "$read_write_args" "--strict-mcp-config"
 
 resume_args="$(run_success resume --resume 11111111-1111-1111-1111-111111111111)"
@@ -381,6 +406,8 @@ assert_contains "$(cat "$TMP_ROOT/review-diff.out")" "fake final review"
 assert_contains "$review_args_text" "--tools Read,Grep,Glob,LS"
 assert_contains "$review_args_text" "--strict-mcp-config"
 assert_not_contains "$review_args_text" "Bash"
+assert_not_contains "$review_args_text" "ToolSearch"
+assert_not_contains "$review_args_text" "--allowedTools"
 assert_contains "$(cat "$review_dir/prompt.md")" "base_ref: HEAD"
 assert_contains "$(cat "$review_dir/prompt.md")" "+change"
 assert_contains "$(cat "$review_dir/metadata.json")" '"review_kind": "diff"'
@@ -511,6 +538,18 @@ assert_json_file "$(job_dir_for_work "$error_result_work")/metadata.json"
 
 partial_result_args="$(run_success_with_behavior partial-result partial-result)"
 assert_contains "$partial_result_args" "--tools Read,Grep,Glob,LS"
+assert_not_contains "$partial_result_args" "ToolSearch"
+assert_not_contains "$partial_result_args" "--allowedTools"
+
+run_success_with_behavior permission-prose permission-prose >/dev/null
+permission_prose_dir="$(job_dir_for_work "$TMP_ROOT/work-permission-prose")"
+assert_not_contains "$(cat "$permission_prose_dir/metadata.md")" "## Warnings"
+assert_not_contains "$(cat "$permission_prose_dir/metadata.md")" "fewer-permission-prompts"
+
+run_success_with_behavior permission-denial-prose permission-denial-prose >/dev/null
+permission_denial_prose_dir="$(job_dir_for_work "$TMP_ROOT/work-permission-denial-prose")"
+assert_contains "$(cat "$permission_denial_prose_dir/metadata.md")" "## Warnings"
+assert_contains "$(cat "$permission_denial_prose_dir/metadata.md")" "You do not have permission to use tool Write"
 
 prompt_work="$(new_workdir prompt-file)"
 prompt_args="$TMP_ROOT/prompt-file.args"
@@ -763,12 +802,13 @@ mark_job_stale "$doctor_work/.cc-watch/cc-doctor-empty-pids" "starting" "" "" ""
 ANTHROPIC_API_KEY=dummy-secret FAKE_ARGS_LOG="$doctor_args" \
   "$CC_WATCH" doctor --cwd "$doctor_work" --claude "$FAKE_CLAUDE" > "$doctor_out"
 doctor_text="$(cat "$doctor_out")"
-assert_contains "$doctor_text" "cc_watch_version=0.5.9"
+assert_contains "$doctor_text" "cc_watch_version=0.5.10"
 assert_contains "$doctor_text" "claude_path=$FAKE_CLAUDE"
 assert_contains "$doctor_text" "claude_version=fake claude 0.0.0"
 assert_contains "$doctor_text" "flag_print=yes"
 assert_contains "$doctor_text" "flag_stream_json=yes"
 assert_contains "$doctor_text" "flag_tools=yes"
+assert_contains "$doctor_text" "flag_allowed_tools=yes"
 assert_contains "$doctor_text" "flag_strict_mcp_config=yes"
 assert_contains "$doctor_text" "flag_no_session_persistence=yes"
 assert_contains "$doctor_text" "flag_permission_mode=yes"
@@ -1249,7 +1289,9 @@ FAKE_ARGS_LOG="$resume_mcp_args_log" FAKE_BEHAVIOR=success \
   "$CC_WATCH" resume --cwd "$persist_work" --claude "$FAKE_CLAUDE" \
   --mcp-tool mcp__siyuan__siyuan_ping "resumable thread" -- "continue with mcp" > "$TMP_ROOT/resumable-mcp-resume.out"
 assert_contains "$(tail -1 "$resume_mcp_args_log")" "--resume 11111111-1111-1111-1111-111111111111"
-assert_contains "$(tail -1 "$resume_mcp_args_log")" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping"
+assert_contains "$(tail -1 "$resume_mcp_args_log")" "--tools Read,Grep,Glob,LS,ToolSearch"
+assert_contains "$(tail -1 "$resume_mcp_args_log")" "--allowedTools mcp__siyuan__siyuan_ping"
+assert_not_contains "$(tail -1 "$resume_mcp_args_log")" "Read,Grep,Glob,LS,mcp__"
 assert_not_contains "$(tail -1 "$resume_mcp_args_log")" "--strict-mcp-config"
 
 lineage_work="$(new_workdir resume-title-lineage)"

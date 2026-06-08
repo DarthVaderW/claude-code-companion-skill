@@ -28,7 +28,8 @@ Resolved after `v0.3.0`:
   can see compact progress during long Claude calls without reading raw
   `stream-json`.
 - `cc-watch` now supports repeatable `--mcp-tool TOOL`, which loads configured
-  MCP servers while keeping Claude's `--tools` list narrowed to explicit tools.
+  MCP servers, keeps built-in `--tools` narrowed, enables `ToolSearch` for lazy
+  discovery, and passes expanded MCP names through `--allowedTools`.
 - `cc-watch repair-stale` provides a dry-run-first cleanup path for old
   non-terminal jobs whose worker, Claude, and watchdog processes have all died.
   It marks them `failed` and writes a readable result archive; it does not
@@ -41,6 +42,10 @@ Resolved after `v0.3.0`:
   the user's Claude Code plugin-prefixed MCP tool names, rejects other bare
   names before Claude starts, and records both requested and effective tool
   names in job metadata.
+- `cc-watch --mcp-tool` no longer puts MCP names in Claude's built-in `--tools`
+  flag. Plugin MCP servers may still appear as `pending` in the init stream;
+  that is healthy when `ToolSearch` later discovers and calls the allowlisted
+  tool.
 
 Resolved in `v0.3.0`:
 
@@ -68,8 +73,8 @@ Resolved in `v0.3.0`:
    alone is not a write guard.
 3. Investigate whether Claude Code exposes a reliable pre-prompt readiness
    signal for plugin MCP servers. For now, `pending` plugin servers should be
-   treated as readiness lag and diagnosed separately from `--mcp-tool`
-   permission mistakes.
+   treated as readiness lag; failure is only when `ToolSearch` cannot discover
+   the allowlisted tool or Claude reports an actual permission denial.
 
 ## Origin
 

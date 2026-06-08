@@ -212,10 +212,12 @@ Do not use `--read-write` for ordinary Codex/Claude collaboration. Prefer
 having Codex pass the relevant diff or file excerpts in the prompt.
 Use broad `--allow-mcp` only for deliberate diagnostics. For ordinary
 SiYuan/Zotero reads, pass one or more exact read-only MCP tool names with
-`--mcp-tool TOOL`; this loads Claude Code's MCP config but keeps `--tools`
-narrow. Tool names are installation-dependent. Custom MCP servers may expose
-names such as `mcp__siyuan__siyuan_ping`, while Claude Code plugins commonly
-expose longer names such as
+`--mcp-tool TOOL`; this loads Claude Code's MCP config, keeps built-in
+`--tools` narrow, adds `ToolSearch` for lazy MCP discovery, and passes the
+expanded MCP names through Claude's `--allowedTools` gate. Tool names are
+installation-dependent. Custom MCP servers may expose names such as
+`mcp__siyuan__siyuan_ping`, while Claude Code plugins commonly expose longer
+names such as
 `mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query` and
 `mcp__plugin_zotero-mcp_zotero__zotero_ping`.
 
@@ -273,8 +275,8 @@ claude-code-companion/scripts/cc-watch run --persist-session --cwd . --title pap
 Then resume the same title with the specific SiYuan/Zotero read tools needed for
 the paper or project task. If Claude's initial stream reports plugin MCP
 servers as `pending`, treat that as readiness lag rather than a tool-permission
-failure; rerun or resume the same persisted title after the plugin tools finish
-registering. Do not allow MCP write/delete/move tools unless the user
+failure; a successful `ToolSearch` followed by the requested MCP call is the
+normal healthy path. Do not allow MCP write/delete/move tools unless the user
 explicitly approves that side effect.
 
 ## Install As A Codex Skill
@@ -296,7 +298,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.9
+  --ref v0.5.10
 ```
 
 Restart Codex after installing or updating skills.

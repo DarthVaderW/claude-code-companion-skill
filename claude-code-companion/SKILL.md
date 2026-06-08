@@ -33,7 +33,8 @@ Do not call Claude for tiny tasks where Codex can answer directly.
   by default and disables MCP config unless `--allow-mcp` is explicit.
 - Prefer explicit MCP tool allowlists over broad MCP access. Use repeatable
   `--mcp-tool TOOL` for known read-only SiYuan/Zotero tools; it implies MCP
-  config loading but keeps `--tools` narrow.
+  config loading, keeps built-in `--tools` narrow, and gates MCP execution
+  through `--allowedTools`.
 - Prefer passing diffs, file lists, or command output in the prompt. Use
   `--allow-bash` only when Claude genuinely needs shell access.
 - For long prompts, write a Markdown prompt file and pass `--prompt-file`.
@@ -234,12 +235,15 @@ for the task. Claude Code MCP tool names are installation-dependent. Exact
 `mcp__...` names are passed through unchanged; short `siyuan_*` and `zotero_*`
 aliases expand to the user's Claude Code plugin tool names, for example
 `mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query`. Other bare names fail before
-Claude starts. Start with ping/list/search/get style tools. If the initial
-stream shows plugin MCP servers as `pending`, treat it as readiness lag rather
-than proof that the tool is absent; resume the same persisted title after the
-plugin tools have registered. Do not allow write/delete/move tools unless the
-user explicitly approves the side effect. Use broad `--allow-mcp` only for a
-deliberate diagnostic where the prompt and environment are already safe.
+Claude starts. Internally, `--mcp-tool` keeps built-in tools narrow, enables
+`ToolSearch` for lazy MCP discovery, and passes the expanded MCP names through
+Claude's `--allowedTools` gate. Start with ping/list/search/get style tools. If
+the initial stream shows plugin MCP servers as `pending`, treat it as readiness
+lag rather than proof that the tool is absent; a successful `ToolSearch`
+followed by the requested MCP call is the normal healthy path. Do not allow
+write/delete/move tools unless the user explicitly approves the side effect. Use
+broad `--allow-mcp` only for a deliberate diagnostic where the prompt and
+environment are already safe.
 
 ## Strict Review Hooks
 

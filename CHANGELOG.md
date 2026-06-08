@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.10 - 2026-06-08
+
+- Fix `--mcp-tool` invocation for Claude Code plugin MCP tools: keep MCP names
+  out of `--tools`, add `ToolSearch` for lazy MCP discovery, and pass the
+  expanded MCP allowlist through `--allowedTools`.
+- Add `cc-watch doctor` detection for Claude's `--allowedTools` flag.
+- Tighten tests and docs around plugin MCP `pending` status: pending at init is
+  expected when tools are later discovered through `ToolSearch`.
+
 ## v0.5.9 - 2026-06-08
 
 - Expand `--mcp-tool siyuan_*` and `--mcp-tool zotero_*` short aliases to the
