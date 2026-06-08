@@ -48,6 +48,28 @@ case "${FAKE_BEHAVIOR:-success}" in
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
     printf '%s' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
     ;;
+  mcp-pending)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111","mcp_servers":{"plugin:siyuan-mcp:siyuan":{"status":"pending"},"plugin:zotero-mcp:zotero":{"status":"pending"}}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
+  mcp-pending-mixed)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111","mcp_servers":{"plugin:siyuan-mcp:siyuan":{"status":"connected"},"plugin:zotero-mcp:zotero":{"status":"pending"}}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
+  mcp-pending-array)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111","mcp_servers":[{"name":"plugin:siyuan-mcp:siyuan","status":"connected"},{"name":"plugin:zotero-mcp:zotero","status":"pending"}]}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
+  mcp-pending-prose)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111","mcp_servers":{"plugin:siyuan-mcp:siyuan":{"status":"connected"}}}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"The MCP write is pending approval, but this is prose rather than server readiness."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
+  non-mcp-pending-structured)
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111","mcp_servers":{"plugin:siyuan-mcp:siyuan":{"status":"connected"}}}'
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"review","status":"pending"}]}}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"fake final review"}'
+    ;;
   findings)
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-1111-1111-111111111111"}'
     printf '%s\n' '{"type":"result","subtype":"success","session_id":"11111111-1111-1111-1111-111111111111","result":"Intro paragraph.\n\n## Findings\n\n### P1: Bug\nActionable finding body.\n\n```md\n## Not a real heading\n```\n\n### P2: Risk\nRisk body with sk-ant-secretvalue.\n\n## Appendix\nThis should not be in findings output."}'
@@ -253,7 +275,7 @@ assert_contains "$(cat "$TMP_ROOT/default-result.json")" '"result_text"'
 assert_contains "$(cat "$TMP_ROOT/default-result.json")" "fake final review"
 
 version_text="$("$CC_WATCH" --version)"
-assert_contains "$version_text" "cc-watch 0.5.8"
+assert_contains "$version_text" "cc-watch 0.5.9"
 
 allow_bash_args="$(run_success allow-bash --allow-bash)"
 assert_contains "$allow_bash_args" "--tools Read,Grep,Glob,LS,Bash"
@@ -267,13 +289,53 @@ mcp_tool_args="$(run_success mcp-tool --mcp-tool mcp__siyuan__siyuan_ping --mcp-
 assert_contains "$mcp_tool_args" "--tools Read,Grep,Glob,LS,mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping"
 assert_not_contains "$mcp_tool_args" "--strict-mcp-config"
 mcp_tool_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-tool")"
+assert_contains "$(cat "$mcp_tool_dir/metadata.json")" '"mcp_tool_requests": ["mcp__siyuan__siyuan_ping","mcp__zotero__zotero_ping"]'
 assert_contains "$(cat "$mcp_tool_dir/metadata.json")" '"mcp_tools": ["mcp__siyuan__siyuan_ping","mcp__zotero__zotero_ping"]'
+assert_contains "$(cat "$mcp_tool_dir/metadata.md")" "- mcp_tool_requests: \`mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping\`"
 assert_contains "$(cat "$mcp_tool_dir/metadata.md")" "- mcp_tools: \`mcp__siyuan__siyuan_ping,mcp__zotero__zotero_ping\`"
+
+mcp_alias_args="$(run_success mcp-tool-alias --mcp-tool siyuan_sql_query --mcp-tool zotero_ping)"
+assert_contains "$mcp_alias_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query,mcp__plugin_zotero-mcp_zotero__zotero_ping"
+mcp_alias_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-tool-alias")"
+assert_contains "$(cat "$mcp_alias_dir/metadata.json")" '"mcp_tool_requests": ["siyuan_sql_query","zotero_ping"]'
+assert_contains "$(cat "$mcp_alias_dir/metadata.json")" '"mcp_tools": ["mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query","mcp__plugin_zotero-mcp_zotero__zotero_ping"]'
+
+mcp_pending_args="$(run_success_with_behavior mcp-pending mcp-pending --mcp-tool siyuan_ping)"
+assert_contains "$mcp_pending_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+mcp_pending_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending")"
+assert_contains "$(cat "$mcp_pending_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
+assert_contains "$(cat "$mcp_pending_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
+
+mcp_pending_mixed_args="$(run_success_with_behavior mcp-pending-mixed mcp-pending-mixed --mcp-tool siyuan_ping)"
+assert_contains "$mcp_pending_mixed_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+mcp_pending_mixed_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending-mixed")"
+assert_not_contains "$(cat "$mcp_pending_mixed_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
+assert_contains "$(cat "$mcp_pending_mixed_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
+
+mcp_pending_array_args="$(run_success_with_behavior mcp-pending-array mcp-pending-array --mcp-tool siyuan_ping)"
+assert_contains "$mcp_pending_array_args" "--tools Read,Grep,Glob,LS,mcp__plugin_siyuan-mcp_siyuan__siyuan_ping"
+mcp_pending_array_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending-array")"
+assert_not_contains "$(cat "$mcp_pending_array_dir/metadata.md")" "MCP server pending: plugin:siyuan-mcp:siyuan"
+assert_contains "$(cat "$mcp_pending_array_dir/metadata.md")" "MCP server pending: plugin:zotero-mcp:zotero"
+
+run_success_with_behavior mcp-pending-prose mcp-pending-prose --mcp-tool siyuan_ping >/dev/null
+mcp_pending_prose_dir="$(job_dir_for_work "$TMP_ROOT/work-mcp-pending-prose")"
+assert_not_contains "$(cat "$mcp_pending_prose_dir/metadata.md")" "MCP server pending"
+
+run_success_with_behavior non-mcp-pending-structured non-mcp-pending-structured --mcp-tool siyuan_ping >/dev/null
+non_mcp_pending_structured_dir="$(job_dir_for_work "$TMP_ROOT/work-non-mcp-pending-structured")"
+assert_not_contains "$(cat "$non_mcp_pending_structured_dir/metadata.md")" "MCP server pending"
 
 if FAKE_ARGS_LOG="$TMP_ROOT/bad-mcp-tool.args" FAKE_BEHAVIOR=success \
   "$CC_WATCH" run --cwd "$(new_workdir bad-mcp-tool)" --claude "$FAKE_CLAUDE" \
   --mcp-tool "bad,tool" -- "review only" >/dev/null 2>&1; then
   fail "mcp tool with comma should fail"
+fi
+
+if FAKE_ARGS_LOG="$TMP_ROOT/bare-mcp-tool.args" FAKE_BEHAVIOR=success \
+  "$CC_WATCH" run --cwd "$(new_workdir bare-mcp-tool)" --claude "$FAKE_CLAUDE" \
+  --mcp-tool "paper_search" -- "review only" >/dev/null 2>&1; then
+  fail "bare non-mcp tool should fail"
 fi
 
 if FAKE_ARGS_LOG="$TMP_ROOT/mcp-tool-read-write.args" FAKE_BEHAVIOR=success \
@@ -701,7 +763,7 @@ mark_job_stale "$doctor_work/.cc-watch/cc-doctor-empty-pids" "starting" "" "" ""
 ANTHROPIC_API_KEY=dummy-secret FAKE_ARGS_LOG="$doctor_args" \
   "$CC_WATCH" doctor --cwd "$doctor_work" --claude "$FAKE_CLAUDE" > "$doctor_out"
 doctor_text="$(cat "$doctor_out")"
-assert_contains "$doctor_text" "cc_watch_version=0.5.8"
+assert_contains "$doctor_text" "cc_watch_version=0.5.9"
 assert_contains "$doctor_text" "claude_path=$FAKE_CLAUDE"
 assert_contains "$doctor_text" "claude_version=fake claude 0.0.0"
 assert_contains "$doctor_text" "flag_print=yes"

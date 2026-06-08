@@ -213,8 +213,16 @@ having Codex pass the relevant diff or file excerpts in the prompt.
 Use broad `--allow-mcp` only for deliberate diagnostics. For ordinary
 SiYuan/Zotero reads, pass one or more exact read-only MCP tool names with
 `--mcp-tool TOOL`; this loads Claude Code's MCP config but keeps `--tools`
-narrow. Tool names are installation-dependent, for example
-`mcp__siyuan__siyuan_ping` or `mcp__zotero__zotero_ping`.
+narrow. Tool names are installation-dependent. Custom MCP servers may expose
+names such as `mcp__siyuan__siyuan_ping`, while Claude Code plugins commonly
+expose longer names such as
+`mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query` and
+`mcp__plugin_zotero-mcp_zotero__zotero_ping`.
+
+For the user's Claude Code plugin installs, `cc-watch` also accepts narrow
+short aliases beginning with `siyuan_` or `zotero_` and expands them to the
+plugin-prefixed Claude tool names. Other bare names fail before Claude starts,
+so a typo does not look like a broken MCP server.
 
 For rigorous projects or long-running `/goals` style work, use a strict review
 loop: ask Claude for a read-only plan review before editing, then ask Claude for
@@ -257,14 +265,17 @@ tools:
 
 ```bash
 claude-code-companion/scripts/cc-watch run --persist-session --cwd . --title paper-review \
-  --mcp-tool mcp__siyuan__siyuan_ping \
-  --mcp-tool mcp__zotero__zotero_ping \
+  --mcp-tool siyuan_ping \
+  --mcp-tool zotero_ping \
   -- "Verify MCP visibility and summarize the available read-only path."
 ```
 
 Then resume the same title with the specific SiYuan/Zotero read tools needed for
-the paper or project task. Do not allow MCP write/delete/move tools unless the
-user explicitly approves that side effect.
+the paper or project task. If Claude's initial stream reports plugin MCP
+servers as `pending`, treat that as readiness lag rather than a tool-permission
+failure; rerun or resume the same persisted title after the plugin tools finish
+registering. Do not allow MCP write/delete/move tools unless the user
+explicitly approves that side effect.
 
 ## Install As A Codex Skill
 
@@ -285,7 +296,7 @@ For stable multi-Mac installs, use Codex's skill installer from the GitHub repo:
 python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
   --repo DarthVaderW/claude-code-companion-skill \
   --path claude-code-companion \
-  --ref v0.5.8
+  --ref v0.5.9
 ```
 
 Restart Codex after installing or updating skills.

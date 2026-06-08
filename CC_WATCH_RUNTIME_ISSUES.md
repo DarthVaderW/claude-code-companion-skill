@@ -37,6 +37,10 @@ Resolved after `v0.3.0`:
   job counts, and a dry-run repair command for repairable stale jobs.
 - The README now separates local symlink development installs from stable
   GitHub-tagged skill installs and updates.
+- `cc-watch --mcp-tool` now expands `siyuan_*` and `zotero_*` short aliases to
+  the user's Claude Code plugin-prefixed MCP tool names, rejects other bare
+  names before Claude starts, and records both requested and effective tool
+  names in job metadata.
 
 Resolved in `v0.3.0`:
 
@@ -62,6 +66,10 @@ Resolved in `v0.3.0`:
 2. Add real MCP smoke-check examples only after exact read-only SiYuan/Zotero
    tool names are stable across the user's Claude Code installs. Prompt text
    alone is not a write guard.
+3. Investigate whether Claude Code exposes a reliable pre-prompt readiness
+   signal for plugin MCP servers. For now, `pending` plugin servers should be
+   treated as readiness lag and diagnosed separately from `--mcp-tool`
+   permission mistakes.
 
 ## Origin
 

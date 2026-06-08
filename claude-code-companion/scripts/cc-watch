@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-CC_WATCH_VERSION=0.5.8
+CC_WATCH_VERSION=0.5.9
 QUIET_AFTER_DEFAULT=60
 MAX_RUNTIME_DEFAULT=1800
 EFFORT_DEFAULT=max
@@ -61,7 +61,9 @@ Options:
   --allow-bash          Add Bash to the read-only tool allowlist. Off by default.
   --allow-mcp           Load Claude Code MCP config instead of strict empty MCP.
   --mcp-tool TOOL       Load MCP config and add one explicit MCP tool to the
-                        read-only tool allowlist. Repeatable.
+                        read-only tool allowlist. Use exact mcp__... names.
+                        siyuan_* and zotero_* expand to Claude plugin names.
+                        Repeatable.
   --read-write          Allow Claude Code's default write-capable tools.
   --persist-session     Allow Claude Code to persist this print-mode session.
   --resume SESSION_ID   Resume a persisted Claude Code session.
@@ -290,6 +292,30 @@ validate_tool_name() {
   fi
 }
 
+append_mcp_tool() {
+  local requested_tool="$1"
+  local effective_tool
+  validate_tool_name "$requested_tool"
+  case "$requested_tool" in
+    mcp__*)
+      effective_tool="$requested_tool"
+      ;;
+    siyuan_*)
+      effective_tool="mcp__plugin_siyuan-mcp_siyuan__${requested_tool}"
+      ;;
+    zotero_*)
+      effective_tool="mcp__plugin_zotero-mcp_zotero__${requested_tool}"
+      ;;
+    *)
+      die "--mcp-tool '$requested_tool' is not a Claude MCP tool name. Use exact mcp__... names, or supported Claude plugin aliases siyuan_* / zotero_*."
+      ;;
+  esac
+  MCP_TOOL_REQUESTS+=("$requested_tool")
+  MCP_TOOLS+=("$effective_tool")
+  MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
+  ALLOW_MCP=1
+}
+
 validate_git_ref() {
   local ref="$1"
   [ -n "$ref" ] || die "--base requires a non-empty value"
@@ -432,6 +458,7 @@ parse_run_options() {
   ALLOW_BASH=0
   ALLOW_MCP=0
   MCP_TOOLS=()
+  MCP_TOOL_REQUESTS=()
   MCP_TOOL_COUNT=0
   READ_WRITE=0
   NO_SESSION_PERSISTENCE=1
@@ -516,10 +543,7 @@ parse_run_options() {
         ;;
       --mcp-tool)
         [ "$#" -ge 2 ] || die "--mcp-tool requires a value"
-        validate_tool_name "$2"
-        MCP_TOOLS+=("$2")
-        MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
-        ALLOW_MCP=1
+        append_mcp_tool "$2"
         shift 2
         ;;
       --read-write)
@@ -862,8 +886,14 @@ write_config() {
   write_file "$JOB_DIR/heartbeat" "$HEARTBEAT"
   write_file "$JOB_DIR/allow_bash" "$ALLOW_BASH"
   write_file "$JOB_DIR/allow_mcp" "$ALLOW_MCP"
+  : > "$JOB_DIR/mcp_tool_requests"
   : > "$JOB_DIR/mcp_tools"
   local tool
+  if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
+    for tool in "${MCP_TOOL_REQUESTS[@]}"; do
+      printf '%s\n' "$tool" >> "$JOB_DIR/mcp_tool_requests"
+    done
+  fi
   if [ "${MCP_TOOL_COUNT:-0}" -gt 0 ]; then
     for tool in "${MCP_TOOLS[@]}"; do
       printf '%s\n' "$tool" >> "$JOB_DIR/mcp_tools"
@@ -910,8 +940,16 @@ load_config() {
   [ -n "$HEARTBEAT" ] || HEARTBEAT=0
   ALLOW_BASH="$(read_file "$JOB_DIR/allow_bash")"
   ALLOW_MCP="$(read_file "$JOB_DIR/allow_mcp")"
+  MCP_TOOL_REQUESTS=()
   MCP_TOOLS=()
   MCP_TOOL_COUNT=0
+  if [ -f "$JOB_DIR/mcp_tool_requests" ]; then
+    local requested_tool
+    while IFS= read -r requested_tool; do
+      [ -n "$requested_tool" ] || continue
+      MCP_TOOL_REQUESTS+=("$requested_tool")
+    done < "$JOB_DIR/mcp_tool_requests"
+  fi
   if [ -f "$JOB_DIR/mcp_tools" ]; then
     local tool
     while IFS= read -r tool; do
@@ -1081,6 +1119,86 @@ extract_denied_tool_warnings() {
   ' "$stdout_log" "$stderr_log"
 }
 
+extract_mcp_pending_warnings() {
+  local stdout_log="$1"
+  local stderr_log="$2"
+  perl -MJSON::PP -CS -e '
+    my @paths = @ARGV;
+    my $json = JSON::PP->new;
+    my %seen;
+    my @warnings;
+
+    sub collect_pending_servers {
+      my ($value, $parent_key, $out) = @_;
+      if (ref($value) eq "HASH") {
+        my $status = exists $value->{status} && !ref($value->{status}) ? $value->{status} : "";
+        if ($status =~ /\Apending\z/i) {
+          my $server = "";
+          for my $key (qw(name id server server_name mcp_server)) {
+            if (exists $value->{$key} && !ref($value->{$key}) && $value->{$key} =~ /\S/) {
+              $server = $value->{$key};
+              last;
+            }
+          }
+          if (!$server && defined $parent_key && $parent_key =~ /^(plugin:|mcp)/i) {
+            $server = $parent_key;
+          }
+          push @$out, $server || "__generic_pending__";
+        }
+        for my $key (keys %$value) {
+          collect_pending_servers($value->{$key}, $key, $out);
+        }
+      } elsif (ref($value) eq "ARRAY") {
+        collect_pending_servers($_, $parent_key, $out) for @$value;
+      }
+    }
+
+    for my $path (@paths) {
+      next unless defined $path && -s $path;
+      open my $fh, "<:encoding(UTF-8)", $path or next;
+      while (my $line = <$fh>) {
+        my $event = eval { $json->decode($line) };
+        my @servers;
+        if ($event) {
+          if (ref($event) eq "HASH") {
+            collect_pending_servers($event->{mcp_servers}, "mcp_servers", \@servers)
+              if exists $event->{mcp_servers};
+            collect_pending_servers($event->{mcpServers}, "mcpServers", \@servers)
+              if exists $event->{mcpServers};
+          }
+        } else {
+          @servers = $line =~ /"?((?:plugin:|mcp)[A-Za-z0-9_.:-]+)"?\s*:\s*\{[^{}]*"status"\s*:\s*"pending"/ig;
+          if (!@servers && $line =~ /pending/i && $line =~ /mcp_servers|mcpServers|plugin:/i) {
+            @servers = ("__generic_pending__");
+          }
+        }
+        next unless @servers;
+        if (@servers) {
+          for my $server (@servers) {
+            my $warning = $server eq "__generic_pending__"
+              ? "MCP server pending in Claude stream; treat as readiness lag, not an allowlist denial"
+              : "MCP server pending: $server";
+            next if $seen{$warning}++;
+            push @warnings, $warning;
+          }
+        }
+        last if @warnings >= 8;
+      }
+      last if @warnings >= 8;
+    }
+    print join("", map { "- $_\n" } @warnings);
+  ' "$stdout_log" "$stderr_log"
+}
+
+extract_job_warnings() {
+  local stdout_log="$1"
+  local stderr_log="$2"
+  {
+    extract_denied_tool_warnings "$stdout_log" "$stderr_log"
+    extract_mcp_pending_warnings "$stdout_log" "$stderr_log"
+  } | awk 'NF && !seen[$0]++'
+}
+
 render_transcript() {
   local reason="$1"
   local status exit_code elapsed session title resumed_from prompt_file result_text_file stderr_log stdout_log
@@ -1165,7 +1283,7 @@ write_metadata_files() {
   title="$(read_file "$JOB_DIR/title")"
   resumed_from="$(read_file "$JOB_DIR/resumed_from")"
   target_repo="$(target_repo_summary)"
-  warnings="$(extract_denied_tool_warnings "$JOB_DIR/stdout.jsonl" "$JOB_DIR/stderr.log")"
+  warnings="$(extract_job_warnings "$JOB_DIR/stdout.jsonl" "$JOB_DIR/stderr.log")"
   session_resumable=no
   if [ -n "$session" ] && [ "$(read_file "$JOB_DIR/no_session_persistence")" != "1" ]; then
     session_resumable=yes
@@ -1194,6 +1312,7 @@ write_metadata_files() {
     printf '  "resumed_from": %s,\n' "$(printf '%s' "$resumed_from" | json_string)"
     printf '  "allow_bash": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_bash")" | json_string)"
     printf '  "allow_mcp": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/allow_mcp")" | json_string)"
+    printf '  "mcp_tool_requests": %s,\n' "$(json_string_array_file "$JOB_DIR/mcp_tool_requests")"
     printf '  "mcp_tools": %s,\n' "$(json_string_array_file "$JOB_DIR/mcp_tools")"
     printf '  "read_write": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/read_write")" | json_string)"
     printf '  "prompt_file": %s,\n' "$(printf '%s' "$(read_file "$JOB_DIR/prompt_file")" | json_string)"
@@ -1223,6 +1342,9 @@ write_metadata_files() {
     printf '%s\n' "- model: \`$(read_file "$JOB_DIR/model")\`"
     printf '%s\n' "- effort: \`$(read_file "$JOB_DIR/effort")\`"
     printf '%s\n' "- heartbeat: \`$(read_file "$JOB_DIR/heartbeat")\`"
+    if [ -s "$JOB_DIR/mcp_tool_requests" ]; then
+      printf '%s\n' "- mcp_tool_requests: \`$(paste -sd, "$JOB_DIR/mcp_tool_requests")\`"
+    fi
     if [ -s "$JOB_DIR/mcp_tools" ]; then
       printf '%s\n' "- mcp_tools: \`$(paste -sd, "$JOB_DIR/mcp_tools")\`"
     fi
@@ -1297,7 +1419,7 @@ write_result_archive() {
         printf '%s\n\n' "$reason"
       fi
       local warnings last_assistant_text
-      warnings="$(extract_denied_tool_warnings "$stdout_log" "$stderr_log")"
+      warnings="$(extract_job_warnings "$stdout_log" "$stderr_log")"
       if [ -n "$warnings" ]; then
         printf '## Warnings\n\n'
         printf '%s\n' "$warnings"
@@ -2372,6 +2494,7 @@ parse_resume_options() {
   ALLOW_BASH=0
   ALLOW_MCP=0
   MCP_TOOLS=()
+  MCP_TOOL_REQUESTS=()
   MCP_TOOL_COUNT=0
   READ_WRITE=0
   NO_SESSION_PERSISTENCE=0
@@ -2457,10 +2580,7 @@ parse_resume_options() {
         ;;
       --mcp-tool)
         [ "$#" -ge 2 ] || die "--mcp-tool requires a value"
-        validate_tool_name "$2"
-        MCP_TOOLS+=("$2")
-        MCP_TOOL_COUNT=$((MCP_TOOL_COUNT + 1))
-        ALLOW_MCP=1
+        append_mcp_tool "$2"
         shift 2
         ;;
       --read-write)

@@ -224,17 +224,22 @@ Prefer this shape:
 
 ```bash
 scripts/cc-watch run --persist-session --cwd . --title paper-review \
-  --mcp-tool mcp__siyuan__siyuan_ping \
-  --mcp-tool mcp__zotero__zotero_ping \
+  --mcp-tool siyuan_ping \
+  --mcp-tool zotero_ping \
   -- "Verify read-only MCP visibility, then report what tools are available."
 ```
 
 Then resume the same title with the specific read-only search/get tools needed
-for the task. Tool names are installation-dependent; use the exact Claude Code
-MCP tool names. Start with ping/list/search/get style tools. Do not allow
-write/delete/move tools unless the user explicitly approves the side effect.
-Use broad `--allow-mcp` only for a deliberate diagnostic where the prompt and
-environment are already safe.
+for the task. Claude Code MCP tool names are installation-dependent. Exact
+`mcp__...` names are passed through unchanged; short `siyuan_*` and `zotero_*`
+aliases expand to the user's Claude Code plugin tool names, for example
+`mcp__plugin_siyuan-mcp_siyuan__siyuan_sql_query`. Other bare names fail before
+Claude starts. Start with ping/list/search/get style tools. If the initial
+stream shows plugin MCP servers as `pending`, treat it as readiness lag rather
+than proof that the tool is absent; resume the same persisted title after the
+plugin tools have registered. Do not allow write/delete/move tools unless the
+user explicitly approves the side effect. Use broad `--allow-mcp` only for a
+deliberate diagnostic where the prompt and environment are already safe.
 
 ## Strict Review Hooks
 

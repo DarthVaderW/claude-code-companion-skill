@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.9 - 2026-06-08
+
+- Expand `--mcp-tool siyuan_*` and `--mcp-tool zotero_*` short aliases to the
+  Claude Code plugin-prefixed MCP tool names used by the user's installed
+  SiYuan/Zotero plugins.
+- Reject other bare `--mcp-tool` names before starting Claude, so allowlist
+  typos fail early instead of surfacing later as confusing permission denials.
+- Record both requested MCP tool names and effective allowlisted tool names in
+  job metadata.
+- Surface plugin MCP `pending` servers as separate job warnings and document
+  that readiness lag is distinct from missing allowlist permissions.
+
 ## v0.5.8 - 2026-06-07
 
 - Refuse ambiguous `cc-watch resume <title>` calls when the same title maps to
